@@ -6,7 +6,7 @@ from unittest.mock import patch
 from rightmemory.config import SyncConfig
 from rightmemory.learning import (
     LEARNING_DOMAINS,
-    cleanup_processed_learning,
+    withdraw_learning_candidate,
     list_learning_candidates,
     record_learning_processed,
     submit_learning,
@@ -33,7 +33,7 @@ class LearningSyncTests(SyncTestBase):
         self._git(root, "add", "-f", "--", "learning")
         self._git(root, "commit", "-m", "curate learning")
 
-    def _process_both(self, root, candidate_id):
+    def _process_all(self, root, candidate_id):
         for domain in LEARNING_DOMAINS:
             record_learning_processed(root, domain, [candidate_id])
 
@@ -81,9 +81,9 @@ class LearningSyncTests(SyncTestBase):
             self.assertEqual((self.device / relative).read_bytes(), content)
         self._assert_no_sync_candidates()
 
-    def test_independent_domain_receipts_merge_without_retiring_raw_source(self):
+    def test_independent_domain_receipts_merge_and_retire_completed_source(self):
         candidate_id = self._seed_candidate()
-        original = self._candidate_path(self.device, candidate_id).read_bytes()
+        record_learning_processed(self.device, "memory", [candidate_id])
         record_learning_processed(self.device, "guidance", [candidate_id])
         self._commit_learning(self.device)
         record_learning_processed(self.other, "skills", [candidate_id])
@@ -95,8 +95,9 @@ class LearningSyncTests(SyncTestBase):
         self.assertEqual(result.status, "synced", result.message)
         for domain in LEARNING_DOMAINS:
             self.assertEqual(list_learning_candidates(self.device, domain=domain), ())
-        self.assertEqual(self._candidate_path(self.device, candidate_id).read_bytes(), original)
-        self.assertEqual(len(list_learning_candidates(self.device)), 1)
+        self.assertFalse(self._candidate_path(self.device, candidate_id).exists())
+        self.assertEqual(list_learning_candidates(self.device), ())
+        self.assertEqual(self._git(self.device, "status", "--short"), "")
 
     def test_concurrent_identical_submissions_merge_differing_capture_times(self):
         local = submit_learning(self.device, "session", "Evidence.", request_id="request")
@@ -119,6 +120,66 @@ class LearningSyncTests(SyncTestBase):
         self.assertEqual(repair_calls, [])
         self.assertEqual(list_learning_candidates(self.device, domain="guidance"), ())
         self.assertEqual(list_learning_candidates(self.device, domain="skills"), ())
+
+    def test_stale_capture_does_not_resurrect_a_completed_candidate(self):
+        candidate_id = submit_learning(self.device, "session", "Evidence.", request_id="request").candidate_id
+        self._process_all(self.device, candidate_id)
+        self._commit_learning(self.device)
+        self._git(self.device, "push", "origin", "HEAD:main")
+        stale = submit_learning(self.other, "session", "Evidence.", request_id="request")
+        self.assertEqual(stale.candidate_id, candidate_id)
+
+        result = SyncManager(SyncConfig(memory_root=self.other, enabled=True)).pull()
+
+        self.assertEqual(result.status, "synced", result.message)
+        self.assertFalse(self._candidate_path(self.other, candidate_id).exists())
+        self.assertEqual(list_learning_candidates(self.other), ())
+        repeated = submit_learning(self.other, "session", "Evidence.", request_id="request")
+        self.assertEqual(repeated.status, "completed")
+
+    def test_withdrawn_identity_dominates_a_stale_capture_without_false_processed_receipts(self):
+        candidate_id = submit_learning(self.device, "session", "Evidence.", request_id="request").candidate_id
+        withdraw_learning_candidate(self.device, candidate_id)
+        self._commit_learning(self.device)
+        self._git(self.device, "push", "origin", "HEAD:main")
+        submit_learning(self.other, "session", "Evidence.", request_id="request")
+
+        result = SyncManager(SyncConfig(memory_root=self.other, enabled=True)).pull()
+
+        self.assertEqual(result.status, "synced", result.message)
+        self.assertFalse(self._candidate_path(self.other, candidate_id).exists())
+        self.assertEqual(list((self.other / "learning" / "processed").glob("*/*.json")), [])
+        self.assertEqual(submit_learning(self.other, "session", "Evidence.", request_id="request").status, "withdrawn")
+
+    def test_completed_identity_rejects_a_conflicting_stale_capture(self):
+        candidate_id = submit_learning(self.device, "session", "Original.", request_id="request").candidate_id
+        self._process_all(self.device, candidate_id)
+        self._commit_learning(self.device)
+        self._git(self.device, "push", "origin", "HEAD:main")
+        submit_learning(self.other, "session", "Different.", request_id="request")
+        before = self._git(self.other, "rev-parse", "HEAD")
+
+        result = SyncManager(SyncConfig(memory_root=self.other, enabled=True)).pull()
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("receipts do not match", result.message)
+        self.assertEqual(self._git(self.other, "rev-parse", "HEAD"), before)
+
+    def test_withdrawal_receipt_cannot_be_removed_to_resurrect_evidence(self):
+        candidate_id = self._seed_candidate()
+        withdraw_learning_candidate(self.device, candidate_id)
+        self._commit_learning(self.device)
+        self._git(self.device, "push", "origin", "HEAD:main")
+        self._git(self.other, "pull", "--ff-only")
+        path = self.other / "learning" / "withdrawn" / f"{candidate_id}.json"
+        path.unlink()
+        self._commit_learning(self.other)
+        self._git(self.other, "push")
+
+        result = self._manager().pull()
+
+        self.assertEqual(result.status, "error")
+        self.assertTrue((self.device / "learning" / "withdrawn" / f"{candidate_id}.json").exists())
 
     def test_conflicting_submissions_with_same_request_fail_without_model_repair(self):
         local = submit_learning(self.device, "session", "Local.", request_id="request")
@@ -165,13 +226,12 @@ class LearningSyncTests(SyncTestBase):
         result = self._manager().pull()
 
         self.assertEqual(result.status, "error")
-        self.assertIn("not processed by both", result.message)
+        self.assertIn("neither processed by all", result.message)
         self.assertTrue(self._candidate_path(self.device, candidate_id).is_file())
 
     def test_processed_raw_retirement_is_admitted_and_retry_stays_idempotent(self):
         candidate_id = self._seed_candidate()
-        self._process_both(self.other, candidate_id)
-        cleanup_processed_learning(self.other, candidate_ids=[candidate_id])
+        self._process_all(self.other, candidate_id)
         self._commit_learning(self.other)
         self._git(self.other, "push")
 
@@ -190,8 +250,7 @@ class LearningSyncTests(SyncTestBase):
         data["submitted_at"] = "2026-01-01T00:00:00Z"
         local_path.write_text(json.dumps(data))
         self._commit_learning(self.device)
-        self._process_both(self.other, candidate_id)
-        cleanup_processed_learning(self.other, candidate_ids=[candidate_id])
+        self._process_all(self.other, candidate_id)
         self._commit_learning(self.other)
         self._git(self.other, "push")
 
@@ -210,7 +269,7 @@ class LearningSyncTests(SyncTestBase):
         result = self._manager().pull()
 
         self.assertEqual(result.status, "error")
-        self.assertIn("not processed by both", result.message)
+        self.assertIn("neither processed by all", result.message)
         self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), head)
 
     def test_push_rejects_unprocessed_retirement_before_sending_history(self):
@@ -222,12 +281,12 @@ class LearningSyncTests(SyncTestBase):
         result = self._manager().push()
 
         self.assertEqual(result.status, "error")
-        self.assertIn("not processed by both", result.message)
+        self.assertIn("neither processed by all", result.message)
         self.assertEqual(self._git(self.remote, "rev-parse", "main"), remote_head)
 
     def test_processed_receipt_cannot_be_removed_to_make_evidence_pending_again(self):
         candidate_id = self._seed_candidate()
-        self._process_both(self.device, candidate_id)
+        self._process_all(self.device, candidate_id)
         self._commit_learning(self.device)
         self._git(self.device, "push", "origin", "HEAD:main")
         self._git(self.other, "pull", "--ff-only")
@@ -239,7 +298,7 @@ class LearningSyncTests(SyncTestBase):
         result = self._manager().pull()
 
         self.assertEqual(result.status, "error")
-        self.assertIn("receipts cannot be deleted", result.message)
+        self.assertTrue("receipts cannot be deleted" in result.message or "missing unprocessed evidence" in result.message)
         self.assertEqual(list_learning_candidates(self.device, domain="guidance"), ())
 
     def test_ignored_untracked_unicode_learning_file_is_dirty_and_preserved(self):

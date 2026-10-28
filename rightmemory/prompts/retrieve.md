@@ -9,7 +9,7 @@ Select stored source content that materially helps with the current retrieval qu
 - Include user, workflow, or agent-behavior guidance when it can materially change the caller's next action.
 - Select an Agent Correction only when the same failure pattern could materially affect the current work. Agent Corrections participate in ordinary retrieval; do not require a separate pass.
 - Treat pending candidates as unsettled evidence rather than stored fact.
-- Consider relevant learning sources before and after curation. Processing an interaction does not turn its raw evidence into an adopted rule.
+- Consider relevant pending evidence and curated learning sources. A pending interaction is not an adopted rule; after all three domains finish, only the material they retained remains in current retrieval.
 - Treat Open Context Questions as questions, not assertions.
 - Select an `MQ#` heading only for its local relationship context. Do not call a provider or invent a provider question.
 - Do not return unchanged content already delivered in the session unless the runtime explicitly permits it.

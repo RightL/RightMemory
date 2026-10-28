@@ -10,7 +10,6 @@ from rightmemory.codex_app_server import CodexThreadDeleteResult
 from rightmemory.provider_prefixes import ProviderPrefixRecord, ProviderPrefixStore
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
-from rightmemory.recent_submitted import RecentSubmittedMemoryDeliveryStore, RecentSubmittedMemoryEntry
 from rightmemory.retrieve_context import RetrieveContextStore
 
 
@@ -229,10 +228,7 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
                 "session-1",
                 memory_commit="abc123",
                 model_history_json=b'[{"kind":"response","parts":[]}]',
-                visible_recent_candidates={},
             )
-            entry = RecentSubmittedMemoryEntry("update-1", 1, CREATED, "candidate")
-            RecentSubmittedMemoryDeliveryStore(root).record_delivered("session-1", [entry])
 
             result = AgentCliThreadCleanup(root, now=lambda: NOW, client=client).run()
 
@@ -240,10 +236,6 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
             self.assertIsNone(ProviderSessionStore(root, "retrieve").load("session-1"))
             self.assertIsNone(
                 RetrieveContextStore(root).load("session-1").model_history_json
-            )
-            self.assertEqual(
-                RecentSubmittedMemoryDeliveryStore(root).new_entries("session-1", [entry]),
-                [entry],
             )
 
     def test_expired_fork_base_detaches_prefix_without_resetting_retrieve_state(self):
@@ -271,10 +263,7 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
                 PREFIX_KEY,
                 memory_commit="abc123",
                 model_history_json=history,
-                visible_recent_candidates={},
             )
-            entry = RecentSubmittedMemoryEntry("update-1", 1, CREATED, "candidate")
-            RecentSubmittedMemoryDeliveryStore(root).record_delivered(PREFIX_KEY, [entry])
 
             result = AgentCliThreadCleanup(root, now=lambda: NOW, client=client).run()
 
@@ -284,10 +273,6 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
             self.assertEqual(
                 RetrieveContextStore(root).load(PREFIX_KEY).model_history_json,
                 history,
-            )
-            self.assertEqual(
-                RecentSubmittedMemoryDeliveryStore(root).new_entries(PREFIX_KEY, [entry]),
-                [],
             )
 
     def test_expired_fork_base_does_not_detach_replaced_prefix_mapping(self):
@@ -574,7 +559,6 @@ class AgentCliThreadCleanupTests(unittest.TestCase):
                 "session-1",
                 memory_commit="abc123",
                 model_history_json=b'[{"kind":"response","parts":[]}]',
-                visible_recent_candidates={},
             )
 
             AgentCliThreadCleanup(root, now=lambda: NOW, client=client).run()

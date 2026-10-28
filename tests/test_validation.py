@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.guidance import GUIDANCE_INBOX_PATH
 from rightmemory.tools import MemoryTools
 from rightmemory.validation import validate_memory_root
 
@@ -39,14 +38,13 @@ class CompleteMemoryValidationTests(unittest.TestCase):
         self.assertEqual(len(result.document_errors), 1)
         self.assertIsNone(result.memory_report)
 
-    def test_legacy_reference_and_nonregular_corrections_are_rejected(self) -> None:
-        (self.root / "PURSUIT_RULES.md").write_text("test", encoding="utf-8")
+    def test_nonregular_corrections_are_rejected(self) -> None:
         (self.root / "corrections.md").mkdir()
 
         result = validate_memory_root(self.root)
 
         self.assertFalse(result.ok)
-        self.assertEqual(len(result.document_errors), 2)
+        self.assertEqual(len(result.document_errors), 1)
 
     def test_symlinked_required_root_is_rejected(self) -> None:
         memory = self.root / "MEMORY.md"
@@ -70,32 +68,8 @@ class CompleteMemoryValidationTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.errors)
         self.assertEqual(result.document_errors, ())
-        self.assertEqual(result.guidance_errors, ())
         self.assertIsNotNone(result.memory_report)
 
-    def test_guidance_is_validated_even_when_memory_is_valid(self) -> None:
-        (self.root / GUIDANCE_INBOX_PATH).write_text(
-            "# Pending Agent Guidance\n\n## GI-20260815-a1b2c3d4\n\nMissing provenance.\n",
-            encoding="utf-8",
-        )
-
-        result = validate_memory_root(self.root)
-
-        self.assertFalse(result.ok)
-        self.assertTrue(result.guidance_errors)
-        self.assertEqual(result.errors, result.guidance_errors)
-        self.assertIsNotNone(result.memory_report)
-
-    def test_guidance_regular_file_check_is_included_with_root_errors(self) -> None:
-        (self.root / "MEMORY.md").unlink()
-        (self.root / GUIDANCE_INBOX_PATH).mkdir()
-
-        result = validate_memory_root(self.root)
-
-        self.assertFalse(result.ok)
-        self.assertEqual(len(result.document_errors), 1)
-        self.assertEqual(len(result.guidance_errors), 1)
-        self.assertEqual(len(result.errors), 2)
 
     def test_correction_collection_limits_remain_enforced(self) -> None:
         (self.root / "MEMORY_agent-corrections-writing.md").write_text(
@@ -116,6 +90,18 @@ class CompleteMemoryValidationTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertEqual(len(result.errors), 1)
+
+    def test_invalid_current_learning_state_is_readonly_failure(self) -> None:
+        candidate = self.root / "learning" / "candidates" / "invalid.json"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_bytes(b"not a candidate")
+        before = {path.relative_to(self.root): path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
+
+        result = validate_memory_root(self.root)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(any("learning" in error for error in result.errors))
+        self.assertEqual({path.relative_to(self.root): path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
 
 
 if __name__ == "__main__":

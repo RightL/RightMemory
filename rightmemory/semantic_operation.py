@@ -7,7 +7,7 @@ import os
 import shutil
 import uuid
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -211,6 +211,10 @@ class SemanticOperationStore:
         clean_id = _operation_id(operation_id)
         with self._locked(clean_id):
             return self._read_locked(clean_id)
+
+    def peek(self, operation_id: str) -> SemanticOperationRecord | None:
+        """Inspect one atomically replaced record without creating lock files."""
+        return self._read_locked(_operation_id(operation_id))
 
     def claim_prepared(self, operation_id: str) -> SemanticOperationRecord:
         """Claim a prepared semantic outcome while holding execution.lock."""
@@ -567,7 +571,7 @@ class SemanticOperationStore:
                 records.append(self._required_record_locked(operation_id))
         return tuple(records)
 
-    def list_outstanding_records(self) -> tuple[SemanticOperationRecord, ...]:
+    def list_outstanding_records(self, *, read_only: bool = False) -> tuple[SemanticOperationRecord, ...]:
         """Load only operations that still need semantic or effect work."""
         if not self.outstanding_root.exists():
             return ()
@@ -585,16 +589,18 @@ class SemanticOperationStore:
 
         records: list[SemanticOperationRecord] = []
         for operation_id in sorted(operation_ids):
-            with self._locked(operation_id):
+            with nullcontext() if read_only else self._locked(operation_id):
                 record = self._read_locked(operation_id)
                 if record is None:
                     # An unsettled marker is written first. If the process dies
                     # before its receipt, the marker is only an abandoned start.
-                    self._outstanding_path(operation_id).unlink(missing_ok=True)
-                    _fsync_directory(self.outstanding_root)
+                    if not read_only:
+                        self._outstanding_path(operation_id).unlink(missing_ok=True)
+                        _fsync_directory(self.outstanding_root)
                     continue
                 if record.complete:
-                    self._sync_outstanding_locked(record)
+                    if not read_only:
+                        self._sync_outstanding_locked(record)
                     continue
                 records.append(record)
         return tuple(records)
@@ -1045,6 +1051,8 @@ def _json_sha256(value: dict[str, Any]) -> str:
 
 def _input_metadata(value: dict[str, Any]) -> dict[str, Any]:
     """Keep only durable replay data; ordinary semantic turns omit user content."""
+    if value.get("kind") == "curation":
+        return {key: value[key] for key in ("role", "kind", "task_id") if key in value}
     if value.get("kind") == "sync-repair":
         keys = (
             "role",

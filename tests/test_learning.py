@@ -8,8 +8,11 @@ from unittest.mock import patch
 
 from rightmemory.learning import (
     LEARNING_DOMAINS,
-    can_retire_learning_candidate,
-    cleanup_processed_learning,
+    retire_processed_learning,
+    LearningClaim,
+    learning_claims,
+    write_learning_claim,
+    withdraw_learning_candidate,
     is_learning_path,
     learning_candidate_files,
     learning_curated_files,
@@ -32,7 +35,7 @@ class LearningStoreTests(IsolatedWriteTestBase):
     def _receipt_path(self, domain, candidate_id):
         return self.root / "learning" / "processed" / domain / f"{candidate_id}.json"
 
-    def _process_both(self, candidate_id):
+    def _process_all(self, candidate_id):
         for domain in LEARNING_DOMAINS:
             record_learning_processed(self.root, domain, [candidate_id])
 
@@ -85,55 +88,98 @@ class LearningStoreTests(IsolatedWriteTestBase):
         self.assertEqual(self._candidate_path(first.candidate_id).read_bytes(), before)
         self.assertEqual(self._git("rev-parse", "HEAD"), head)
 
-    def test_domains_process_independently_and_raw_source_remains_readable(self):
-        submission = submit_learning(self.root, "session", "Evidence.")
-        candidate_id = submission.candidate_id
+    def test_three_domains_process_independently_then_raw_is_retired(self):
+        candidate_id = submit_learning(self.root, "session", "Evidence.").candidate_id
         before = self._candidate_path(candidate_id).read_bytes()
-        first_receipts = record_learning_processed(self.root, "guidance", [candidate_id])
-        receipt_bytes = first_receipts[0].read_bytes()
-        self.assertEqual(list_learning_candidates(self.root, domain="guidance"), ())
-        self.assertEqual(len(list_learning_candidates(self.root, domain="skills")), 1)
-        self.assertFalse(can_retire_learning_candidate(self.root, candidate_id))
-        self.assertEqual(record_learning_processed(self.root, "guidance", [candidate_id]), first_receipts)
-        self.assertEqual(first_receipts[0].read_bytes(), receipt_bytes)
-
-        record_learning_processed(self.root, "skills", [candidate_id])
-        self.assertEqual(list_learning_candidates(self.root, domain="skills"), ())
-        self.assertEqual(len(list_learning_candidates(self.root)), 1)
-        self.assertTrue(can_retire_learning_candidate(self.root, candidate_id))
-        self.assertEqual(learning_candidate_files(self.root), (self._candidate_path(candidate_id),))
-        self.assertEqual(
-            learning_readable_files(self.root), (self._candidate_path(candidate_id),)
-        )
+        for domain in ("guidance", "skills"):
+            added = record_learning_processed(self.root, domain, [candidate_id])
+            self.assertEqual(added, (self._receipt_path(domain, candidate_id),))
+            self.assertEqual(record_learning_processed(self.root, domain, [candidate_id]), ())
+            self.assertEqual(list_learning_candidates(self.root, domain=domain), ())
+            self.assertEqual(self._candidate_path(candidate_id).read_bytes(), before)
+            self.assertEqual(len(list_learning_candidates(self.root, domain="memory")), 1)
+        self.assertEqual(learning_readable_files(self.root), (self._candidate_path(candidate_id),))
+        changed = record_learning_processed(self.root, "memory", [candidate_id])
+        self.assertEqual(set(changed), {self._receipt_path("memory", candidate_id), self._candidate_path(candidate_id)})
+        self.assertEqual(learning_candidate_files(self.root), ())
+        self.assertEqual(learning_readable_files(self.root), ())
         self.assertEqual(len(learning_files(self.root)), 3)
-        self.assertEqual(self._candidate_path(candidate_id).read_bytes(), before)
+        self.assertEqual(list_learning_candidates(self.root), ())
+        self.assertEqual(retire_processed_learning(self.root), ())
         self.assertEqual(learning_validation_errors(self.root), [])
 
-    def test_scoped_cleanup_preserves_unselected_and_unprocessed_sources(self):
+    def test_completion_preserves_other_unprocessed_sources(self):
         first = submit_learning(self.root, "session", "One.").candidate_id
-        second = submit_learning(self.root, "session", "Two.").candidate_id
-        unfinished = submit_learning(self.root, "session", "Three.").candidate_id
-        self._process_both(first)
-        self._process_both(second)
+        unfinished = submit_learning(self.root, "session", "Two.").candidate_id
+        self._process_all(first)
         record_learning_processed(self.root, "guidance", [unfinished])
-        with self.assertRaisesRegex(ValueError, "not processed by both"):
-            cleanup_processed_learning(self.root, candidate_ids=[first, unfinished])
-        self.assertTrue(self._candidate_path(first).exists())
-
-        self.assertEqual(cleanup_processed_learning(self.root, candidate_ids=[first]), (self._candidate_path(first),))
         self.assertFalse(self._candidate_path(first).exists())
-        self.assertTrue(self._candidate_path(second).exists())
         self.assertTrue(self._candidate_path(unfinished).exists())
-        self.assertEqual(cleanup_processed_learning(self.root), (self._candidate_path(second),))
-        self.assertEqual(cleanup_processed_learning(self.root, candidate_ids=[first]), ())
-        self.assertTrue(self._candidate_path(unfinished).exists())
+        self.assertEqual(retire_processed_learning(self.root), ())
         self.assertEqual(learning_validation_errors(self.root), [])
 
-    def test_cleanup_keeps_retry_identity_without_retaining_raw_evidence_in_receipts(self):
+    def test_withdrawal_retires_raw_and_retries_do_not_resurrect_it(self):
+        candidate_id = submit_learning(self.root, "session", "Evidence.", request_id="request").candidate_id
+        record_learning_processed(self.root, "memory", [candidate_id])
+        changed = withdraw_learning_candidate(self.root, candidate_id)
+        self.assertEqual(len(changed), 2)
+        self.assertFalse(self._candidate_path(candidate_id).exists())
+        self._commit_learning()
+        repeated = submit_learning(self.root, "session", "Evidence.", request_id="request")
+        self.assertEqual(repeated.status, "withdrawn")
+        self.assertEqual(repeated.pending_domains, ())
+        self.assertFalse(repeated.created)
+        self.assertEqual(withdraw_learning_candidate(self.root, candidate_id), ())
+        with self.assertRaisesRegex(ValueError, "withdrawn"):
+            record_learning_processed(self.root, "skills", [candidate_id])
+        with self.assertRaisesRegex(ValueError, "different evidence"):
+            submit_learning(self.root, "session", "Different.", request_id="request")
+
+    def test_claims_prevent_withdrawal_and_are_not_retrieval_sources(self):
+        candidate_id = submit_learning(self.root, "session", "Evidence.").candidate_id
+        claim = LearningClaim("memory", "a" * 32, "b" * 32, "memory-" + "c" * 32,
+                              self._git("rev-parse", "HEAD"), (candidate_id,),
+                              (list_learning_candidates(self.root)[0].evidence_sha256,))
+        path = write_learning_claim(self.root, claim)
+        self.assertEqual(learning_claims(self.root), (claim,))
+        self.assertIn(path, learning_files(self.root))
+        self.assertNotIn(path, learning_readable_files(self.root))
+        with self.assertRaisesRegex(ValueError, "active curator task"):
+            withdraw_learning_candidate(self.root, candidate_id)
+        self.assertTrue(self._candidate_path(candidate_id).exists())
+
+    def test_corrupt_claim_cannot_rebind_a_frozen_input(self):
+        candidate_id = submit_learning(self.root, "session", "Evidence.").candidate_id
+        candidate = list_learning_candidates(self.root)[0]
+        claim = LearningClaim("memory", "a" * 32, "b" * 32, "memory-" + "c" * 32,
+                              self._git("rev-parse", "HEAD"), (candidate_id,), (candidate.evidence_sha256,))
+        path = write_learning_claim(self.root, claim)
+        original = json.loads(path.read_text())
+        for hashes in ([], ["a" * 64], [["nested"]]):
+            with self.subTest(hashes=hashes):
+                path.write_text(json.dumps({**original, "candidate_hashes": hashes}))
+                self.assertTrue(learning_validation_errors(self.root))
+                with self.assertRaises(ValueError):
+                    learning_claims(self.root)
+        path.write_text(json.dumps(original))
+        self.assertEqual(learning_validation_errors(self.root), [])
+        with self.assertRaisesRegex(ValueError, "release the verified domain claim"):
+            record_learning_processed(self.root, "memory", [candidate_id])
+        self.assertFalse(self._receipt_path("memory", candidate_id).exists())
+
+    @unittest.skipIf(os.name == "nt", "symlink semantics require POSIX")
+    def test_capture_refuses_redirected_runtime_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory)
+            (self.root / ".runtime").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                submit_learning(self.root, "session", "Evidence.")
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_completion_keeps_retry_identity_without_retaining_raw_evidence_in_receipts(self):
         submission = submit_learning(self.root, "session", "Full raw evidence.", request_id="request")
         candidate_id = submission.candidate_id
-        self._process_both(candidate_id)
-        cleanup_processed_learning(self.root, candidate_ids=[candidate_id])
+        self._process_all(candidate_id)
         self._commit_learning()
         head = self._git("rev-parse", "HEAD")
         retried = submit_learning(self.root, "session", "Full raw evidence.", request_id="request")
@@ -153,15 +199,14 @@ class LearningStoreTests(IsolatedWriteTestBase):
         path = self._candidate_path(candidate_id)
         original = path.read_text()
         relative = path.relative_to(self.root).as_posix()
-        with self.assertRaisesRegex(ValueError, "not processed by both"):
+        with self.assertRaisesRegex(ValueError, "neither processed by all"):
             validate_learning_candidate_deletion(self.root, relative, original)
-        self._process_both(candidate_id)
-        path.unlink()
+        self._process_all(candidate_id)
         validate_learning_candidate_deletion(self.root, relative, original)
         different_blob = json.loads(original)
         different_blob["evidence"] = "A substituted original."
         different_blob["evidence_sha256"] = hashlib.sha256(different_blob["evidence"].encode()).hexdigest()
-        with self.assertRaisesRegex(ValueError, "not processed by both"):
+        with self.assertRaisesRegex(ValueError, "neither processed by all"):
             validate_learning_candidate_deletion(self.root, relative, json.dumps(different_blob))
 
     def test_missing_source_with_only_one_receipt_is_corruption(self):
@@ -174,15 +219,15 @@ class LearningStoreTests(IsolatedWriteTestBase):
 
     def test_receipts_must_match_the_recorded_evidence(self):
         candidate_id = submit_learning(self.root, "session", "Evidence.", request_id="request").candidate_id
-        self._process_both(candidate_id)
+        self._process_all(candidate_id)
         path = self._receipt_path("guidance", candidate_id)
         data = json.loads(path.read_text())
         data["evidence_sha256"] = "f" * 64
         path.write_text(json.dumps(data))
         self.assertTrue(any("receipts do not match" in item for item in learning_validation_errors(self.root)))
         with self.assertRaises(ValueError):
-            cleanup_processed_learning(self.root)
-        self.assertTrue(self._candidate_path(candidate_id).exists())
+            retire_processed_learning(self.root)
+        self.assertFalse(self._candidate_path(candidate_id).exists())
 
     def test_record_batch_checks_all_inputs_before_writing(self):
         candidate_id = submit_learning(self.root, "session", "Evidence.").candidate_id
@@ -199,7 +244,7 @@ class LearningStoreTests(IsolatedWriteTestBase):
             self._git("config", "user.email", "test@example.com", cwd=other_root)
             second = submit_learning(other_root, "session", "Evidence.", request_id="request")
             self.assertEqual(first.candidate_id, second.candidate_id)
-            self._process_both(first.candidate_id)
+            self._process_all(first.candidate_id)
             for domain in LEARNING_DOMAINS:
                 paths = record_learning_processed(other_root, domain, [second.candidate_id])
                 self.assertEqual(paths[0].read_bytes(), self._receipt_path(domain, first.candidate_id).read_bytes())
@@ -353,7 +398,7 @@ class LearningPathSafetyTests(unittest.TestCase):
         candidate_id = "a" * 64
         for domain in LEARNING_DOMAINS:
             self.assertFalse(learning_write_path(domain, f"learning/candidates/{candidate_id}.json"))
-            self.assertTrue(learning_write_path(domain, f"learning/processed/{domain}/{candidate_id}.json"))
+            self.assertFalse(learning_write_path(domain, f"learning/processed/{domain}/{candidate_id}.json"))
             self.assertTrue(is_learning_path(f"learning/processed/{domain}/{candidate_id}.json"))
         self.assertTrue(is_learning_path(f"learning/candidates/{candidate_id}.json"))
         self.assertTrue(learning_write_path("guidance", "learning/guidance/project/rules.md"))
@@ -380,9 +425,7 @@ class LearningPathSafetyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             record_learning_processed(self.root, "other", [])
         with self.assertRaises(ValueError):
-            can_retire_learning_candidate(self.root, "../outside")
-        with self.assertRaises(ValueError):
-            cleanup_processed_learning(self.root, candidate_ids="a" * 64)
+            withdraw_learning_candidate(self.root, "../outside")
         for session, evidence, request in (
             ("", "Evidence.", None),
             ("session\nother", "Evidence.", None),

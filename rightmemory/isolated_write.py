@@ -29,8 +29,7 @@ from .graph import (
     build_graph_manifest,
     remove_edge_targets,
 )
-from .guidance import GUIDANCE_INBOX_PATH
-from .learning import is_learning_path, learning_write_path, validate_learning_candidate_deletion
+from .learning import is_learning_path, is_learning_state_path, learning_write_path
 from .tools import (
     CORRECTIONS_PATH,
     FIXED_CORRECTION_COLLECTION_PATHS,
@@ -40,8 +39,6 @@ from .tools import (
     SHARED_VIEW_REGISTRY_PATH,
     MemoryTools,
 )
-from .update_coordination import UPDATE_RECORD_PATH_RE
-from .update_record import validate_update_records
 
 
 GIT_TIMEOUT_SECONDS = 30
@@ -52,7 +49,6 @@ PROTECTED_RIGHTMEMORY_PATHS = (
     *ACTIVE_MEMORY_WRITE_PATHS,
     *ACTIVE_PURSUIT_WRITE_PATHS,
     CORRECTIONS_PATH,
-    GUIDANCE_INBOX_PATH,
     "learning",
 )
 INSIGHT_WRITE_PATHS = ("insight_logs/*.md",)
@@ -277,10 +273,6 @@ class IsolatedWriteSupervisor:
         operation_input: Mapping[str, Any] | None = None,
         effects_for_outcome: Callable[[tuple[str, ...], int], Iterable[OperationEffect]] | None = None,
         prepare_effects: Callable[[str, Path], None] | None = None,
-        prepare_managed_artifacts: Callable[
-            [Path, str, str | None, tuple[str, ...], Any], Iterable[str]
-        ]
-        | None = None,
         external_finalizer: str | None = None,
         check_current: Callable[[], None] | None = None,
     ) -> IsolatedWriteResult:
@@ -295,7 +287,6 @@ class IsolatedWriteSupervisor:
                 operation_input=operation_input,
                 effects_for_outcome=effects_for_outcome,
                 prepare_effects=prepare_effects,
-                prepare_managed_artifacts=prepare_managed_artifacts,
                 external_finalizer=external_finalizer,
                 check_current=check_current,
             )
@@ -309,7 +300,6 @@ class IsolatedWriteSupervisor:
                 operation_input=operation_input,
                 effects_for_outcome=effects_for_outcome,
                 prepare_effects=prepare_effects,
-                prepare_managed_artifacts=prepare_managed_artifacts,
                 external_finalizer=external_finalizer,
                 check_current=check_current,
             )
@@ -322,10 +312,6 @@ class IsolatedWriteSupervisor:
         operation_input: Mapping[str, Any] | None = None,
         effects_for_outcome: Callable[[tuple[str, ...], int], Iterable[OperationEffect]] | None = None,
         prepare_effects: Callable[[str, Path], None] | None = None,
-        prepare_managed_artifacts: Callable[
-            [Path, str, str | None, tuple[str, ...], Any], Iterable[str]
-        ]
-        | None = None,
         external_finalizer: str | None = None,
         check_current: Callable[[], None] | None = None,
     ) -> IsolatedWriteResult:
@@ -410,24 +396,6 @@ class IsolatedWriteSupervisor:
                     changed_paths = tuple(
                         sorted({path for commit in commits for path in self._commit_paths(worktree, commit)})
                     )
-                managed_paths: tuple[str, ...] = ()
-                if prepare_managed_artifacts is not None:
-                    managed_paths = self._prepare_managed_artifacts(
-                        worktree,
-                        start_head,
-                        commits[0] if commits else None,
-                        changed_paths,
-                        output,
-                        prepare_managed_artifacts,
-                        operation_id=operation_id,
-                    )
-                    if managed_paths:
-                        commits = [self._git_stdout(worktree, "rev-parse", "HEAD")]
-                        self._validate_candidate(
-                            worktree,
-                            commits,
-                            managed_paths=frozenset(managed_paths),
-                        )
                 if check_current is not None:
                     check_current()
                 if operation_store is not None and operation_id is not None:
@@ -530,11 +498,7 @@ class IsolatedWriteSupervisor:
                             raise MainMemoryDirtyError(dirty)
                         # Prepared outcomes can outlive a role-policy change.
                         # Recheck the current fence before publishing their saved tree.
-                        managed_paths = frozenset(
-                            path for path in self._commit_paths(self.memory_root, candidate)
-                            if self._is_managed_artifact_path(path)
-                        )
-                        self._validate_commits(self.memory_root, [candidate], managed_paths=managed_paths)
+                        self._validate_commits(self.memory_root, [candidate])
                         if current_head == outcome.start_commit:
                             self._land_operation_commit(candidate)
                         else:
@@ -699,8 +663,6 @@ class IsolatedWriteSupervisor:
         self,
         worktree: Path,
         commits: list[str],
-        *,
-        managed_paths: frozenset[str] = frozenset(),
     ) -> None:
         if self.role in {"update", "pursuit-map"} and len(commits) > 1:
             raise RuntimeError(f"one {self.role} turn must land at most one commit")
@@ -711,13 +673,8 @@ class IsolatedWriteSupervisor:
             invalid_paths = {
                 path
                 for path in changed_paths
-                if path not in managed_paths and not self._is_role_write_path(path)
+                if not self._is_role_write_path(path)
             }
-            if self.role in {"guidance-curator", "skills-curator"}:
-                for path in tuple(invalid_paths):
-                    if re.fullmatch(r"learning/candidates/[0-9a-f]{64}\.json", path):
-                        self._validate_learning_deletion(worktree, commit, path)
-                        invalid_paths.remove(path)
             if invalid_paths:
                 paths = ", ".join(sorted(invalid_paths))
                 label = "non-insight paths" if self.role == "insight" else "non-memory paths"
@@ -730,20 +687,8 @@ class IsolatedWriteSupervisor:
         self,
         worktree: Path,
         commits: list[str],
-        *,
-        managed_paths: frozenset[str] = frozenset(),
     ) -> None:
-        self._validate_commits(worktree, commits, managed_paths=managed_paths)
-        if managed_paths:
-            if any(not self._is_managed_artifact_path(path) for path in managed_paths):
-                raise RuntimeError("runtime-managed artifacts use an invalid path")
-            if any(UPDATE_RECORD_PATH_RE.fullmatch(path) for path in managed_paths):
-                diagnostics = validate_update_records(worktree)
-                if diagnostics:
-                    raise RuntimeError(
-                        "invalid runtime-managed update record:\n"
-                        + "\n".join(f"- {item}" for item in diagnostics)
-                    )
+        self._validate_commits(worktree, commits)
         if self.role == "insight":
             return
         validation = MemoryTools(worktree, role=self.role).validate_memory(
@@ -752,63 +697,6 @@ class IsolatedWriteSupervisor:
         )
         if validation.startswith("validation failed:"):
             raise RuntimeError(validation)
-
-    def _prepare_managed_artifacts(
-        self,
-        worktree: Path,
-        start_commit: str,
-        candidate_commit: str | None,
-        changed_paths: tuple[str, ...],
-        output: Any,
-        prepare: Callable[[Path, str, str | None, tuple[str, ...], Any], Iterable[str]],
-        *,
-        operation_id: str | None,
-    ) -> tuple[str, ...]:
-        paths = tuple(
-            dict.fromkeys(
-                prepare(
-                    worktree,
-                    start_commit,
-                    candidate_commit,
-                    changed_paths,
-                    output,
-                )
-            )
-        )
-        if not paths:
-            return ()
-        if any(
-            not isinstance(path, str) or not self._is_managed_artifact_path(path)
-            for path in paths
-        ):
-            raise RuntimeError("runtime-managed artifacts use an invalid path")
-        dirty = set(
-            _porcelain_paths(
-                self._git_stdout(worktree, "status", "--porcelain", "--untracked-files=all")
-            )
-        )
-        if dirty != set(paths):
-            detail = ", ".join(sorted(dirty ^ set(paths))) or "unknown paths"
-            raise RuntimeError(f"runtime-managed artifacts changed unexpected paths: {detail}")
-        self._run_git(worktree, "add", "-f", "-A", "--", *paths)
-        if candidate_commit is None:
-            if operation_id is None:
-                raise RuntimeError("a managed no-change artifact requires an operation id")
-            self._run_git(
-                worktree,
-                "commit",
-                "-m",
-                "\n".join(
-                    (
-                        f"{self.role}: record processed candidate batch",
-                        "",
-                        f"{OPERATION_TRAILER}: {operation_id}",
-                    )
-                ),
-            )
-        else:
-            self._run_git(worktree, "commit", "--amend", "--no-edit")
-        return paths
 
     def _rebase_operation_commit(self, worktree: Path, commit: str, new_base: str) -> str:
         self._run_git(worktree, "reset", "--hard", new_base)
@@ -855,7 +743,7 @@ class IsolatedWriteSupervisor:
 
     def _is_semantic_read_path(self, path: str) -> bool:
         separate_domain_path = (
-            path.startswith("learning/") or path == GUIDANCE_INBOX_PATH
+            path.startswith("learning/")
             or path in FIXED_CORRECTION_COLLECTION_PATHS or bool(MEMORY_SKILL_FILE_RE.fullmatch(path))
         )
         if self.role in {"update", "pruner"} and separate_domain_path:
@@ -872,7 +760,6 @@ class IsolatedWriteSupervisor:
                 CORRECTIONS_PATH,
                 SHARED_VIEW_REGISTRY_PATH,
                 SHARE_REGISTRY_PATH,
-                GUIDANCE_INBOX_PATH,
             }
             or path.startswith("learning/")
             or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
@@ -914,10 +801,10 @@ class IsolatedWriteSupervisor:
     def _is_role_write_path(self, path: str) -> bool:
         if self.role in {"guidance-curator", "skills-curator"}:
             domain = self.role.removesuffix("-curator")
-            if path.startswith("learning/processed/"):
+            if is_learning_state_path(path):
                 return False
             return learning_write_path(domain, path) or (
-                domain == "guidance" and path in {*FIXED_CORRECTION_COLLECTION_PATHS, GUIDANCE_INBOX_PATH}
+                domain == "guidance" and path in FIXED_CORRECTION_COLLECTION_PATHS
             ) or (domain == "skills" and bool(MEMORY_SKILL_FILE_RE.fullmatch(path)))
         if self.role == "insight":
             return bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
@@ -933,31 +820,14 @@ class IsolatedWriteSupervisor:
                 or path in {SHARED_VIEW_REGISTRY_PATH, SHARE_REGISTRY_PATH}
                 or bool(SHARED_VIEW_DEFINITION_FILE_RE.fullmatch(path))
                 or bool(INSIGHT_LOG_FILE_RE.fullmatch(path))
-                or path == GUIDANCE_INBOX_PATH
                 or (
                     is_learning_path(path)
-                    and not path.startswith(("learning/candidates/", "learning/processed/"))
+                    and not is_learning_state_path(path)
                 )
             )
         return self.role in {"pruner", "update"} and (
             path == "MEMORY.md" or bool(MEMORY_DETAIL_FILE_RE.fullmatch(path))
         ) and not MEMORY_SKILL_FILE_RE.fullmatch(path)
-
-    def _is_managed_artifact_path(self, path: str) -> bool:
-        if self.role == "update":
-            return _is_managed_update_artifact_path(path)
-        if self.role in {"guidance-curator", "skills-curator"}:
-            domain = self.role.removesuffix("-curator")
-            return re.fullmatch(rf"learning/processed/{domain}/[0-9a-f]{{64}}\.json", path) is not None
-        return False
-
-    def _validate_learning_deletion(self, worktree: Path, commit: str, path: str) -> None:
-        if self._run_git(worktree, "cat-file", "-e", f"{commit}:{path}", check=False).returncode == 0:
-            raise RuntimeError("curators cannot create or modify raw learning evidence")
-        original = self._run_git(worktree, "show", f"{commit}^:{path}", check=False)
-        if original.returncode:
-            raise RuntimeError(f"learning deletion has no original evidence: {path}")
-        validate_learning_candidate_deletion(worktree, path, original.stdout)
 
     def _is_graph_rightmemory_path(self, path: str) -> bool:
         if path in FIXED_CORRECTION_COLLECTION_PATHS:
@@ -1375,10 +1245,6 @@ def _safe_role_slug(role: str) -> str:
     if not slug:
         return "role"
     return slug[:48].rstrip(".-") or "role"
-
-
-def _is_managed_update_artifact_path(path: str) -> bool:
-    return UPDATE_RECORD_PATH_RE.fullmatch(path) is not None
 
 
 def _is_temp_branch_for_role(branch: str, role_slug: str) -> bool:

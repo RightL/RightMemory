@@ -129,8 +129,8 @@ def _cli_agent_guidance(memory_root: Path, role: str) -> str:
     if role == "retrieve":
         return (
             "\nCLI-agent adaptation:\n"
-            "- Your final response must be exactly one JSON object with only `ids`, `sources`, and "
-            "`recent_candidates`; do not wrap it in Markdown or add prose.\n"
+            "- Your final response must be exactly one JSON object with only `ids` and `sources`; "
+            "do not wrap it in Markdown or add prose.\n"
             "- The `read_*` names in the canonical instructions describe standalone tools. In CLI-agent mode, "
             "inspect the equivalent files with the provider CLI's read-only file tools instead of emitting those tool calls.\n"
             "- Inspect M# and S# backing files only through their schema-derived filenames. Inspect MF# content "
@@ -147,7 +147,7 @@ def _command_guidance(role: str) -> str:
             "- The `rightmemory retrieve` command selected retrieval. Treat every caller message as a read-only "
             "retrieval request without requiring or expecting a dispatch prefix.\n"
             "- Do not edit RightMemory files or use git write tools in this mode. If the caller asks you to preserve "
-            "or change memory, ask them to use `rightmemory update`."
+            "or change memory, direct them to `rightmemory submit` or the relevant maintenance skill."
         )
     if role == "historian":
         return (
@@ -155,20 +155,13 @@ def _command_guidance(role: str) -> str:
             "read-only archaeology request over pruned memory and Git history.\n"
             "- Return historical matches as historical or pruned memory, not active memory. Do not edit memory files."
         )
-    if role == "update":
+    if role in {"update", "guidance-curator", "skills-curator"}:
         return (
-            "- The `rightmemory update` command selected ordinary Memory updating. Treat every caller message as a "
-            "RightMemory candidate without requiring a dispatch prefix.\n"
-            "- A caller message may contain one candidate or an ordered batch. Reconcile the evidence into "
-            "Memory or leave it unincorporated, using candidate text as evidence. Pursuit, behavioral guidance, "
-            "and reusable skills are read-only context for this role."
-        )
-    if role in {"guidance-curator", "skills-curator"}:
-        return (
-            "- The learning task selects Update or Maintain within this domain. Update starts from new "
+            "- The curation task selects Update or Maintain within this domain. Update starts from pending "
             "evidence; Maintain starts from the supplied scope and existing material.\n"
-            "- Work in the task's isolated worktree. Program completion records processing and publishes "
-            "validated work; raw evidence and processing receipts are program-owned."
+            "- Work in the task's isolated worktree. Program completion publishes validated work and records "
+            "domain processing. Candidate evidence, claims, and receipts are program-owned; raw sources are "
+            "removed after all three domains finish."
         )
     if role == "pruner":
         return (
@@ -226,7 +219,7 @@ def _tool_guidance(role: str) -> str:
             "- `read_detail(detail_id)` resolves a relevant `F#` id and reads its Memory or Pursuit graph detail.\n"
             "- `read_markdown(markdown_id)` reads the complete line-numbered free-form source for an `M#` heading.\n"
             "- `read_skill(skill_id)` reads the complete skill for an `S#` heading.\n"
-            "- `read_learning(source_id)` reads independent evidence, guidance, or work skills from the learning index.\n"
+            "- `read_learning(source_id, offset=0, limit=12000)` reads or pages pending evidence, guidance, or work skills from the learning index.\n"
             "- `search_learning(query, offset=0, limit=20)` searches the complete learning collection by literal terms; an empty query browses it.\n"
             "- `read_mf(mf_id, resource_id=None)` reads a validated mirrored Memory document or one of its "
             "referenced F#, M#, or S# resources."
@@ -278,7 +271,7 @@ def _tool_guidance(role: str) -> str:
     if role == "sync-reconciler":
         guidance += (
             "\n- Commit and edit tools are scoped to `MEMORY.md`, `MEMORY_*.md`, `PURSUITS.md`, `PURSUIT_*.md`, "
-            "`corrections.md`, "
+            "`corrections.md`, curated `learning/guidance/`, `learning/experiences/`, and `learning/skills/` content, "
             "`shared_views.toml`, `shares.toml`, "
             "`shared_views/<view-id>/view.md`, `shared_views/<view-id>/retriever.md`, "
             "`shared_views/<view-id>/recipe.toml`, `shared_views/<view-id>/question.toml`, and `insight_logs/*.md` for sync repair; keep unrelated untracked files out of repair commits "

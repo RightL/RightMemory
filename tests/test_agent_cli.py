@@ -35,7 +35,7 @@ from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSession
 from rightmemory.provider_threads import ProviderThreadStore
 
 
-EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": [], "recent_candidates": []}'
+EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": []}'
 
 
 class ProviderSessionStoreTests(unittest.TestCase):

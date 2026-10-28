@@ -6,6 +6,7 @@ from pathlib import Path
 
 from rightmemory.graph import (
     KNOWN_EDGE_TYPES,
+    PURSUIT_DETAIL_FILE_RE,
     block_body_text,
     build_graph_manifest,
     build_mf_manifest,
@@ -146,7 +147,7 @@ class PursuitGrammarTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_bytes(b"# Memory\n")
 
     def test_title_only_and_free_markdown_body_validate_without_fields(self):
-        body = "\r\nA **note**, a [link](https://example.test), and a list.  \r\n\r\n- Ordinary list\r\n\r\n```md\r\n## An example, not a map group\r\n```\r\n"
+        body = "\r\nA **note**, a [link](https://example.test), and a list.  \r\n\r\n- Ordinary list\r\n- `file.py` starts this work.\r\n- `reference`\r\n\r\n```md\r\n## An example, not a map group\r\n- `example` A graph syntax example. → []\r\n```\r\n"
         (self.root / "PURSUITS.md").write_bytes(
             ("# Pursuits\r\n\r\n## Title only {#first}\r\n\r\n## Notes {#notes}\r\n" + body).encode()
         )
@@ -155,30 +156,53 @@ class PursuitGrammarTests(unittest.TestCase):
         self.assertEqual(set(manifest.items), {"first", "notes"})
         self.assertEqual(block_body_text(manifest, manifest.items["notes"]), body)
 
-    def test_legacy_next_keeps_all_actions_and_graph_looking_bullets_as_body(self):
-        body = (
-            "\n**State:** Old context.\n\n**Next:**\n"
-            "- `do` Continue.\n- `research` Unknown old action.\n"
-            "- `not a slug` No validation as a node. -> [rel:missing]\n"
-            "- `looks-like-node` Still a Next bullet. -> []\n"
-            "- An ordinary bullet.\n\n**Done when:** Older prose.\n"
-            "**Status:** Anything here is body.\n"
+    def test_pursuit_graph_nodes_are_invalid_in_root_and_reachable_detail_files(self):
+        sources = {
+            "PURSUITS.md": "# Pursuits\n\n- `old-root` Root leaf. → []\n\n## Parent {F#parent}\n",
+            "PURSUIT_parent.md": "# Child {#child}\n\n- `old-child` Child leaf. → []\n",
+        }
+        for name, text in sources.items():
+            (self.root / name).write_text(text, encoding="utf-8")
+
+        manifest = build_graph_manifest(self.root)
+
+        self.assertEqual(set(manifest.items), {"parent", "child"})
+        self.assertTrue(any("Pursuit graph nodes are not valid at PURSUITS.md:3" in error for error in manifest.errors))
+        self.assertTrue(any("Pursuit graph nodes are not valid at PURSUIT_parent.md:3" in error for error in manifest.errors))
+        for name, text in sources.items():
+            self.assertEqual((self.root / name).read_bytes(), text.encode("utf-8"))
+
+    def test_rules_id_has_an_ordinary_pursuit_detail_path(self):
+        (self.root / "PURSUITS.md").write_text("# Pursuits\n\n## Rules {F#rules}\n", encoding="utf-8")
+        (self.root / "PURSUIT_rules.md").write_text("# Direction {#direction}\n", encoding="utf-8")
+
+        manifest = build_graph_manifest(self.root)
+
+        self.assertEqual(manifest.errors, [])
+        self.assertEqual(manifest.backing["rules"].path, self.root / "PURSUIT_rules.md")
+        self.assertEqual(set(manifest.items), {"rules", "direction"})
+        self.assertIsNotNone(PURSUIT_DETAIL_FILE_RE.fullmatch("PURSUIT_rules.md"))
+        self.assertIsNotNone(PURSUIT_DETAIL_FILE_RE.fullmatch("PURSUIT_RULES.md"))
+
+    def test_focus_references_remain_distinct_from_graph_nodes(self):
+        (self.root / "PURSUITS.md").write_text(
+            "# Pursuits\n\n## Focus\n\n  - `direction`  \n\n## Direction {#direction}\n",
+            encoding="utf-8",
         )
-        (self.root / "PURSUITS.md").write_bytes(("# Pursuits\n\n## Old {#old}\n" + body).encode())
         manifest = build_graph_manifest(self.root)
         self.assertEqual(manifest.errors, [])
-        self.assertEqual(set(manifest.items), {"old"})
-        self.assertEqual(block_body_text(manifest, manifest.items["old"]), body)
+        self.assertEqual([item_id for item_id, _, _ in manifest.focus_ids], ["direction"])
+        self.assertEqual(set(manifest.items), {"direction"})
 
-    def test_legacy_next_stops_at_field_or_heading(self):
-        for boundary in ("**State:** Another field.", "## Other {#other}"):
-            with self.subTest(boundary=boundary):
-                (self.root / "PURSUITS.md").write_bytes((
-                    "# Pursuits\n\n## Old {#old}\n**Next:**\n"
-                    "- `research` Kept.\n" + boundary + "\n- `broken` Missing edge list.\n"
-                ).encode())
-                manifest = build_graph_manifest(self.root)
-                self.assertTrue(any("node `broken` must include an edge list" in error for error in manifest.errors))
+        for suffix in (" Graph leaf. → []", " description"):
+            with self.subTest(suffix=suffix):
+                text = "# Pursuits\n\n## Focus\n\n- `direction`" + suffix + "\n\n## Direction {#direction}\n"
+                (self.root / "PURSUITS.md").write_text(text, encoding="utf-8")
+                invalid = build_graph_manifest(self.root)
+                self.assertTrue(any("must contain only a backticked Pursuit heading id" in error for error in invalid.errors))
+                self.assertEqual(invalid.focus_ids, [])
+                self.assertEqual((self.root / "PURSUITS.md").read_bytes(), text.encode("utf-8"))
+
 
     def test_heading_helpers_share_edges_and_preserve_original_suffix(self):
         line = "###   中文 and English  {F#stable}  -> [doc:target,  dep:other ]\r\n"
@@ -332,7 +356,7 @@ class MfGraphManifestTests(unittest.TestCase):
             encoding="utf-8",
         )
         (self.dist / "MEMORY_detail.md").write_text(
-            "### Detail Topic {#detail-topic}\n\nDetail body.\n",
+            "### Detail Topic {#detail-topic}\n\nDetail body.\n\n- `detail-fact` Useful evidence. → []\n",
             encoding="utf-8",
         )
         (self.dist / "MEMORY_evidence.md").write_text("free form\n", encoding="utf-8")
@@ -342,7 +366,8 @@ class MfGraphManifestTests(unittest.TestCase):
 
         self.assertEqual(manifest.namespace, "MF#auth-api")
         self.assertEqual(manifest.errors, [])
-        self.assertEqual(set(manifest.items), {"topic", "detail", "detail-topic", "evidence", "instructions"})
+        self.assertEqual(set(manifest.items), {"topic", "detail", "detail-topic", "detail-fact", "evidence", "instructions"})
+        self.assertEqual(manifest.items["detail-fact"].item_kind, "node")
         self.assertEqual(manifest.backing["evidence"].kind, "M#")
         self.assertEqual(manifest.backing["instructions"].kind, "S#")
 

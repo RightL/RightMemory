@@ -19,7 +19,7 @@ from rightmemory.embedding_retrieval import (
 from rightmemory.embedding_service import create_app, _allows_keyless_bind
 from rightmemory.embedding_models import adapter_identity, model_fingerprint
 from rightmemory.profiles import _profile_seed_config
-from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
+from rightmemory.learning_retrieval import LearningSource
 from rightmemory.retrieval_index import RetrievalCorpus, RetrievalEntry, build_retrieval_corpus, search_passages
 from rightmemory.runtime import RightMemoryRuntime
 from rightmemory.session import MessageSessionStore
@@ -97,11 +97,12 @@ class EmbeddingRetrievalTests(unittest.TestCase):
         self.assertNotEqual(before, self.corpus().fingerprint)
 
     def test_pending_entries_keep_their_status_and_disappear_when_consumed(self):
-        entry = RecentSubmittedMemoryEntry("update-test", 7, "2026-09-29T00:00:00Z", "Pending observation.", "uid-seven")
-        with patch("rightmemory.retrieval_index.collect_recent_submitted_memory", return_value=[entry]):
+        entry = LearningSource("L#candidates/source.json", self.root / "learning/candidates/source.json",
+                               "interaction evidence", "Pending observation.", "Pending observation.")
+        with patch("rightmemory.retrieval_index.learning_sources", return_value={entry.source_id: entry}):
             pending = self.corpus()
         candidates = [entry for entry in pending.entries if entry.pending]
-        self.assertEqual([entry.key for entry in candidates], ["pending:uid-seven"])
+        self.assertEqual([entry.key for entry in candidates], ["L#candidates/source.json"])
         self.assertNotEqual(pending.fingerprint, self.corpus().fingerprint)
         self.assertFalse(any(entry.pending for entry in self.corpus().entries))
 

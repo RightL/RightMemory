@@ -2,8 +2,7 @@ from pathlib import Path
 
 from rightmemory.config import SyncConfig
 from rightmemory.sync import SyncManager
-from rightmemory.update_queue import UpdateCandidate
-from rightmemory.update_record import UpdateRecord, UpdateRecordStore
+from rightmemory.learning import list_learning_candidates, record_learning_processed, submit_learning
 from tests.sync_test_base import SyncTestBase
 
 
@@ -21,7 +20,7 @@ class SyncPreflightTests(SyncTestBase):
         self.assertEqual(manager._outgoing_paths(start, end), ["transient.txt"])
 
     def test_preflight_disabled(self):
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=False)).preflight()
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=False)).pull()
 
         self.assertEqual(result.status, "disabled")
         self.assertIn("disabled", result.message)
@@ -38,24 +37,14 @@ class SyncPreflightTests(SyncTestBase):
         self.assertIn("shared_views/*/question.toml", MEMORY_SYNC_PATHS)
         self.assertIn("PURSUITS.md", MEMORY_SYNC_PATHS)
         self.assertIn("PURSUIT_*.md", MEMORY_SYNC_PATHS)
-        self.assertNotIn("PURSUIT_RULES.md", MEMORY_SYNC_PATHS)
-        self.assertNotIn("AGENT_CORRECTION_MEMORY_RULES.md", MEMORY_SYNC_PATHS)
-        self.assertFalse(_is_sync_path("PURSUIT_RULES.md"))
-        self.assertFalse(_is_sync_path("AGENT_CORRECTION_MEMORY_RULES.md"))
         self.assertIn("corrections.md", MEMORY_SYNC_PATHS)
-        self.assertIn("update_queue/candidates/*.json", MEMORY_SYNC_PATHS)
-        self.assertIn("update_queue/recovery/*.json", MEMORY_SYNC_PATHS)
-        self.assertIn("update_queue/lease.json", MEMORY_SYNC_PATHS)
-        self.assertIn("update_records/*.json", MEMORY_SYNC_PATHS)
-        self.assertTrue(_is_sync_path(f"update_queue/candidates/{'a' * 32}.json"))
-        self.assertTrue(_is_sync_path(f"update_queue/recovery/update-batch-{'b' * 64}.json"))
-        self.assertTrue(_is_sync_path("update_queue/lease.json"))
-        self.assertTrue(_is_sync_path(f"update_records/update-batch-{'d' * 64}.json"))
-        self.assertFalse(_is_sync_path("update_queue/candidates/not-a-uuid.json"))
-        self.assertFalse(_is_sync_path(f"update_queue/candidates/{'A' * 32}.json"))
-        self.assertFalse(_is_sync_path(f"update_queue/recovery/{'b' * 64}.json"))
-        self.assertFalse(_is_sync_path("update_queue/extra.json"))
-        self.assertFalse(_is_sync_path("update_records/not-an-operation.json"))
+        self.assertIn("learning/**", MEMORY_SYNC_PATHS)
+        self.assertTrue(_is_sync_path(f"learning/candidates/{'a' * 64}.json"))
+        self.assertTrue(_is_sync_path(f"learning/processed/memory/{'b' * 64}.json"))
+        self.assertTrue(_is_sync_path(f"learning/withdrawn/{'c' * 64}.json"))
+        self.assertTrue(_is_sync_path("learning/claims/memory.json"))
+        self.assertFalse(_is_sync_path("learning/candidates/not-an-identity.json"))
+        self.assertFalse(_is_sync_path("learning/claims/unknown.json"))
 
     def test_preflight_accepts_incoming_root_gitignore_change(self):
         gitignore = "*\n!MEMORY.md\n!PURSUITS.md\n"
@@ -64,7 +53,7 @@ class SyncPreflightTests(SyncTestBase):
         self._git(self.other, "commit", "-m", "sync: update managed gitignore")
         self._git(self.other, "push")
 
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         self.assertEqual(result.status, "synced")
         self.assertEqual((self.device / ".gitignore").read_text(encoding="utf-8"), gitignore)
@@ -102,7 +91,7 @@ class SyncPreflightTests(SyncTestBase):
         self._git(peer, "commit", "-m", "remote outer memory")
         self._git(peer, "push")
 
-        result = SyncManager(SyncConfig(memory_root=nested, enabled=True)).preflight()
+        result = SyncManager(SyncConfig(memory_root=nested, enabled=True)).pull()
 
         self.assertEqual(result.status, "unconfigured")
         self.assertEqual(self._git(outer, "rev-parse", "HEAD"), outer_head)
@@ -117,7 +106,7 @@ class SyncPreflightTests(SyncTestBase):
         self._git(self.other, "commit", "-m", "remote memory")
         self._git(self.other, "push")
 
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         self.assertEqual(result.status, "synced")
         self.assertIn("two", (self.device / "MEMORY.md").read_text(encoding="utf-8"))
@@ -134,7 +123,7 @@ class SyncPreflightTests(SyncTestBase):
         self._git(self.other, "commit", "-m", "sync: update pursuit detail")
         self._git(self.other, "push")
 
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         self.assertEqual(result.status, "synced")
         self.assertEqual(
@@ -142,24 +131,19 @@ class SyncPreflightTests(SyncTestBase):
             pursuit_detail,
         )
 
-    def test_preflight_transports_valid_retained_candidate_record(self):
-        candidate = UpdateCandidate(
-            uid="a" * 32,
-            session_id="agent-session",
-            display_id=1,
-            message="durable candidate evidence",
-            submitted_at="2026-07-27T12:00:00+00:00",
-        )
-        record = UpdateRecord.from_candidates((candidate,))
-        path = UpdateRecordStore(self.other).write(record)
-        self._git(self.other, "add", "-f", path.relative_to(self.other).as_posix())
-        self._git(self.other, "commit", "-m", "update: retain candidate batch")
+    def test_preflight_transports_shared_evidence_and_independent_completion(self):
+        candidate = submit_learning(self.other, "agent-session", "durable candidate evidence")
+        record_learning_processed(self.other, "memory", [candidate.candidate_id])
+        self._git(self.other, "add", "-f", "learning")
+        self._git(self.other, "commit", "-m", "learning: process memory evidence")
         self._git(self.other, "push")
 
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         self.assertEqual(result.status, "synced")
-        self.assertEqual(UpdateRecordStore(self.device).read(record.operation_id), record)
+        self.assertEqual(list_learning_candidates(self.device, domain="memory"), ())
+        self.assertEqual(list_learning_candidates(self.device, domain="guidance")[0].candidate_id,
+                         candidate.candidate_id)
 
     def test_preflight_reports_dirty_memory_without_merging(self):
         (self.other / "MEMORY.md").write_text(
@@ -175,7 +159,7 @@ class SyncPreflightTests(SyncTestBase):
             encoding="utf-8",
         )
 
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         self.assertEqual(result.status, "dirty")
         self.assertEqual(result.files, ["MEMORY.md"])
@@ -194,7 +178,7 @@ class SyncPreflightTests(SyncTestBase):
                 original = path.read_text(encoding="utf-8") if existed else None
                 path.write_text("local synchronized state\n", encoding="utf-8")
 
-                result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+                result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
                 self.assertEqual(result.status, "dirty")
                 self.assertEqual(result.files, [name])
@@ -212,7 +196,7 @@ class SyncPreflightTests(SyncTestBase):
         self._git(self.other, "commit", "-m", "pursuit: add duplicate id")
         self._git(self.other, "push")
 
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         self.assertEqual(result.status, "conflict")
         self.assertIn("duplicate id `one`", result.message)
@@ -226,7 +210,7 @@ class SyncPreflightTests(SyncTestBase):
         self._git(self.other, "commit", "-m", "sync: transport correction union")
         self._git(self.other, "push")
 
-        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         self.assertEqual(result.status, "synced")
         text = (self.device / "corrections.md").read_text(encoding="utf-8")
@@ -242,9 +226,9 @@ class SyncPreflightTests(SyncTestBase):
             encoding="utf-8",
         )
 
-        dirty = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        dirty = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
         registry.unlink()
-        clean = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        clean = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         self.assertEqual(dirty.status, "dirty")
         self.assertEqual(dirty.files, ["shared_views.toml"])
@@ -258,9 +242,9 @@ class SyncPreflightTests(SyncTestBase):
         dist.mkdir()
         (dist / "MEMORY.md").write_text("# Generated shared surface\n", encoding="utf-8")
 
-        dirty = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        dirty = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
         (view_dir / "view.md").unlink()
-        clean = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).preflight()
+        clean = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull()
 
         self.assertEqual(dirty.status, "dirty")
         self.assertEqual(dirty.files, ["shared_views/alice-auth-api/view.md"])

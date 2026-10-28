@@ -3,6 +3,7 @@ import subprocess
 from unittest.mock import patch
 
 from rightmemory.config import SyncConfig
+from rightmemory.learning import LearningClaim, write_learning_claim
 from rightmemory.semantic_operation import SemanticOperationStore
 from rightmemory.sync import SyncManager
 from tests.sync_test_base import SyncTestBase
@@ -55,14 +56,14 @@ class SyncPublicationTests(SyncTestBase):
         self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), start_head)
         self.assertFalse((self.device / "rightmemory.toml").exists())
 
-    def test_malformed_remote_queue_fails_closed_without_model_repair(self):
+    def test_malformed_remote_evidence_fails_closed_without_model_repair(self):
         start_head = self._git(self.device, "rev-parse", "HEAD")
-        relative = f"update_queue/candidates/{'a' * 32}.json"
+        relative = f"learning/candidates/{'a' * 64}.json"
         path = self.other / relative
         path.parent.mkdir(parents=True)
         path.write_text("{not json\n", encoding="utf-8")
         self._git(self.other, "add", "-f", relative)
-        self._git(self.other, "commit", "-m", "queue: add malformed candidate")
+        self._git(self.other, "commit", "-m", "learning: add malformed candidate")
         self._git(self.other, "push")
         repair_calls = []
 
@@ -72,38 +73,37 @@ class SyncPublicationTests(SyncTestBase):
 
         self.assertEqual(result.status, "error")
         self.assertEqual(result.files, [relative])
-        self.assertIn("invalid JSON", result.message)
+        self.assertIn("invalid synchronized learning state", result.message)
         self.assertEqual(repair_calls, [])
         self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), start_head)
         self.assertFalse((self.device / relative).exists())
 
-    def test_queue_conflict_fails_closed_without_model_repair(self):
-        relative = "update_queue/lease.json"
-        for root, owner in ((self.device, "local"), (self.other, "remote")):
-            path = root / relative
-            path.parent.mkdir(parents=True)
-            path.write_text(json.dumps({"owner": owner}) + "\n", encoding="utf-8")
+    def test_claim_conflict_fails_closed_without_model_repair(self):
+        relative = "learning/claims/memory.json"
+        for root, owner in ((self.device, "a"), (self.other, "b")):
+            claim = LearningClaim("memory", owner * 32, owner * 32, "memory-" + owner * 32,
+                                  self._git(root, "rev-parse", "HEAD"), (), (), "maintain", "Context")
+            write_learning_claim(root, claim)
             self._git(root, "add", "-f", relative)
-            self._git(root, "commit", "-m", f"queue: {owner} lease")
+            self._git(root, "commit", "-m", "learning: claim domain")
         start_head = self._git(self.device, "rev-parse", "HEAD")
         local_bytes = (self.device / relative).read_bytes()
         self._git(self.other, "push")
         repair_calls = []
 
-        with patch("rightmemory.sync.validate_update_queue", return_value=[]):
-            result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull(
-                repair=lambda *args: repair_calls.append(args) or "repaired"
-            )
+        result = SyncManager(SyncConfig(memory_root=self.device, enabled=True)).pull(
+            repair=lambda *args: repair_calls.append(args) or "repaired"
+        )
 
         self.assertEqual(result.status, "error")
         self.assertEqual(result.files, [relative])
-        self.assertIn("coordination conflict", result.message)
+        self.assertIn("coordination", result.message)
         self.assertEqual(repair_calls, [])
         self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), start_head)
         self.assertEqual((self.device / relative).read_bytes(), local_bytes)
 
-    def test_malformed_queue_with_memory_conflict_never_reaches_model_repair(self):
-        relative = f"update_queue/candidates/{'a' * 32}.json"
+    def test_malformed_evidence_with_memory_conflict_never_reaches_model_repair(self):
+        relative = f"learning/candidates/{'a' * 64}.json"
         (self.other / "MEMORY.md").write_text(
             "# Domain\n\n- `one` remote durable fact → []\n",
             encoding="utf-8",
@@ -113,7 +113,7 @@ class SyncPublicationTests(SyncTestBase):
         path.write_text("{not json\n", encoding="utf-8")
         self._git(self.other, "add", "MEMORY.md")
         self._git(self.other, "add", "-f", relative)
-        self._git(self.other, "commit", "-m", "remote memory and malformed queue")
+        self._git(self.other, "commit", "-m", "remote memory and malformed evidence")
         self._git(self.other, "push")
         (self.device / "MEMORY.md").write_text(
             "# Domain\n\n- `one` local durable fact → []\n",
@@ -130,7 +130,7 @@ class SyncPublicationTests(SyncTestBase):
 
         self.assertEqual(result.status, "error")
         self.assertEqual(result.files, [relative])
-        self.assertIn("invalid JSON", result.message)
+        self.assertIn("invalid synchronized learning state", result.message)
         self.assertEqual(repair_calls, [])
         self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), start_head)
 

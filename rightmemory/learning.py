@@ -11,12 +11,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-from .guidance import _git, _git_result, _require_repository_root
+from .git_storage import git as _git, git_result as _git_result, require_repository_root as _require_repository_root
 from .session import MemoryWriteLock, _ensure_runtime_gitignore, _fsync_directory
 
 
 LEARNING_DIRECTORY = "learning"
-LEARNING_DOMAINS = ("guidance", "skills")
+LEARNING_DOMAINS = ("memory", "guidance", "skills")
 _ID_RE = re.compile(r"[0-9a-f]{64}")
 _SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
@@ -39,6 +39,20 @@ class LearningSubmission:
     candidate_id: str
     created: bool
     pending_domains: tuple[str, ...]
+    status: str
+
+
+@dataclass(frozen=True)
+class LearningClaim:
+    domain: str
+    holder: str
+    token: str
+    task_id: str
+    base_commit: str
+    candidate_ids: tuple[str, ...]
+    candidate_hashes: tuple[str, ...]
+    mode: str = "update"
+    scope: str = ""
 
 
 @dataclass(frozen=True)
@@ -62,6 +76,8 @@ class _Receipt:
 class _LearningState:
     candidates: dict[str, LearningCandidate]
     receipts: dict[str, dict[str, _Receipt]]
+    withdrawn: dict[str, _Receipt]
+    claims: dict[str, LearningClaim]
     candidate_files: list[Path]
     curated_files: list[Path]
     errors: list[str]
@@ -74,11 +90,11 @@ def submit_learning(
     *,
     request_id: str | None = None,
 ) -> LearningSubmission:
-    """Capture evidence in Git without admitting it into either curated domain.
+    """Capture shared evidence in Git without admitting it into curated state.
 
     A request id identifies one immutable submission within its session. Without
     one, identical evidence in the same session is the same submission. Retries
-    remain idempotent after deliberate source cleanup because receipts retain
+    remain idempotent after completion or withdrawal because receipts retain
     the submission identity and evidence hash.
     """
     root = Path(root).resolve()
@@ -90,6 +106,9 @@ def submit_learning(
     candidate_id = _candidate_id(session_id, request_id, evidence_hash)
     expected = _Receipt(candidate_id, session_id, request_id, evidence_hash)
     _require_repository_root(root)
+    for directory in (root / ".runtime", root / ".runtime" / "worktrees"):
+        if directory.is_symlink():
+            raise ValueError("learning runtime directory must not be a symbolic link")
     _ensure_runtime_gitignore(root / ".runtime")
 
     with MemoryWriteLock(root):
@@ -138,7 +157,7 @@ def submit_learning(
                 "--no-overwrite-ignore",
                 _git(worktree, "rev-parse", "HEAD"),
             )
-            return LearningSubmission(candidate_id, True, LEARNING_DOMAINS)
+            return LearningSubmission(candidate_id, True, LEARNING_DOMAINS, "pending")
         finally:
             _git_result(root, "worktree", "remove", "--force", str(worktree))
             _git_result(root, "branch", "-D", branch)
@@ -155,25 +174,31 @@ def list_learning_candidates(
         for candidate in sorted(
             state.candidates.values(), key=lambda item: (item.submitted_at, item.candidate_id)
         )
-        if domain is None or candidate.candidate_id not in state.receipts[domain]
+        if candidate.candidate_id not in state.withdrawn
+        and not _fully_processed(state, _Receipt.from_candidate(candidate))
+        and (domain is None or candidate.candidate_id not in state.receipts[domain])
     )
 
 
 def record_learning_processed(
     root: Path, domain: str, candidate_ids: Iterable[str]
 ) -> tuple[Path, ...]:
-    """Record a curator's completed inputs in its publication worktree.
+    """Record completion and retire fully processed sources in one transaction.
 
-    This performs no Git publication and never retires source evidence. Callers
-    own the surrounding isolated transaction and validate the completed output
-    before recording its receipts.
+    The coordinator owns publication with the validated semantic result. Returned
+    paths include added receipts and deleted sources; none are model-editable.
     """
     _require_domain(domain)
     root = Path(root)
     state = _require_state(root)
     identifiers = _candidate_ids(candidate_ids)
+    active = state.claims.get(domain)
+    if active is not None and set(identifiers).intersection(active.candidate_ids):
+        raise ValueError("release the verified domain claim before recording its completion")
     prepared: list[tuple[str, _Receipt]] = []
     for candidate_id in identifiers:
+        if candidate_id in state.withdrawn:
+            raise ValueError(f"learning candidate was withdrawn: {candidate_id}")
         candidate = state.candidates.get(candidate_id)
         existing = state.receipts[domain].get(candidate_id)
         if candidate is None:
@@ -185,20 +210,7 @@ def record_learning_processed(
             prepared.append((_receipt_path(domain, candidate_id), receipt))
     for relative, receipt in prepared:
         _write_json(root, relative, vars(receipt))
-    return tuple(root / _receipt_path(domain, candidate_id) for candidate_id in identifiers)
-
-
-def can_retire_learning_candidate(
-    root: Path, candidate_id: str, *, evidence_sha256: str | None = None
-) -> bool:
-    _require_candidate_id(candidate_id)
-    state = _require_state(Path(root))
-    candidate = state.candidates.get(candidate_id)
-    if candidate is None:
-        return False
-    if evidence_sha256 is not None and candidate.evidence_sha256 != evidence_sha256:
-        return False
-    return _fully_processed(state, _Receipt.from_candidate(candidate))
+    return tuple(root / relative for relative, _receipt in prepared) + retire_processed_learning(root)
 
 
 def validate_learning_candidate_deletion(
@@ -212,45 +224,76 @@ def validate_learning_candidate_deletion(
     if original.candidate_id != PurePosixPath(relative_path).stem:
         raise ValueError("learning candidate filename does not match its identity")
     state = _require_state(Path(root))
-    if not _fully_processed(state, _Receipt.from_candidate(original)):
-        raise ValueError(f"learning candidate is not processed by both domains: {original.candidate_id}")
+    identity = _Receipt.from_candidate(original)
+    if not _fully_processed(state, identity) and state.withdrawn.get(original.candidate_id) != identity:
+        raise ValueError(f"learning candidate is neither processed by all domains nor withdrawn: {original.candidate_id}")
 
 
-def cleanup_processed_learning(
-    root: Path, *, candidate_ids: Iterable[str] | None = None
-) -> tuple[Path, ...]:
-    """Deliberately retire eligible sources; callers own retention judgment and Git.
-
-    A supplied scope is all-or-nothing for eligibility. Omitting it selects all
-    fully processed sources. Receipts remain to preserve retry idempotence.
-    """
+def retire_processed_learning(root: Path) -> tuple[Path, ...]:
+    """Normalize active evidence after completion or sync; keep identity receipts."""
     root = Path(root)
     state = _require_state(root)
-    identifiers = (
-        _candidate_ids(candidate_ids)
-        if candidate_ids is not None
-        else tuple(
-            sorted(
-                candidate.candidate_id
-                for candidate in state.candidates.values()
-                if _fully_processed(state, _Receipt.from_candidate(candidate))
-            )
-        )
-    )
     paths: list[Path] = []
-    for candidate_id in identifiers:
-        candidate = state.candidates.get(candidate_id)
-        if candidate is None:
-            if all(candidate_id in state.receipts[domain] for domain in LEARNING_DOMAINS):
-                continue
-            raise ValueError(f"unknown learning candidate: {candidate_id}")
-        if not _fully_processed(state, _Receipt.from_candidate(candidate)):
-            raise ValueError(f"learning candidate is not processed by both domains: {candidate_id}")
-        paths.append(root / _candidate_path(candidate_id))
+    for candidate_id, candidate in sorted(state.candidates.items()):
+        if _fully_processed(state, _Receipt.from_candidate(candidate)) or candidate_id in state.withdrawn:
+            paths.append(root / _candidate_path(candidate_id))
     for path in paths:
         path.unlink()
         _fsync_directory(path.parent)
     return tuple(paths)
+
+
+def withdraw_learning_candidate(root: Path, candidate_id: str) -> tuple[Path, ...]:
+    """Withdraw unclaimed evidence; the caller owns the Git transaction."""
+    _require_candidate_id(candidate_id)
+    root = Path(root)
+    state = _require_state(root)
+    if any(candidate_id in claim.candidate_ids for claim in state.claims.values()):
+        raise ValueError("learning candidate belongs to an active curator task")
+    if candidate_id in state.withdrawn:
+        return retire_processed_learning(root)
+    candidate = state.candidates.get(candidate_id)
+    if candidate is None:
+        if any(candidate_id in receipts for receipts in state.receipts.values()):
+            return ()
+        raise ValueError(f"unknown learning candidate: {candidate_id}")
+    relative = _withdrawn_path(candidate_id)
+    _write_json(root, relative, vars(_Receipt.from_candidate(candidate)))
+    return (root / relative, *retire_processed_learning(root))
+
+
+def learning_claims(root: Path) -> tuple[LearningClaim, ...]:
+    return tuple(_require_state(Path(root)).claims.values())
+
+
+def write_learning_claim(root: Path, claim: LearningClaim) -> Path:
+    root = Path(root)
+    claim = parse_learning_claim(vars(claim))
+    state = _require_state(root)
+    existing = state.claims.get(claim.domain)
+    if existing is not None and existing != claim:
+        raise ValueError("learning domain already has an active claim")
+    for candidate_id, evidence_hash in zip(claim.candidate_ids, claim.candidate_hashes):
+        if candidate_id not in state.candidates or candidate_id in state.withdrawn:
+            raise ValueError(f"claim references unavailable candidate: {candidate_id}")
+        if candidate_id in state.receipts[claim.domain]:
+            raise ValueError(f"claim references already processed candidate: {candidate_id}")
+        if state.candidates[candidate_id].evidence_sha256 != evidence_hash:
+            raise ValueError(f"claim evidence hash does not match candidate: {candidate_id}")
+    relative = _claim_path(claim.domain)
+    _write_json(root, relative, vars(claim))
+    return root / relative
+
+
+def remove_learning_claim(root: Path, claim: LearningClaim) -> Path:
+    root = Path(root)
+    state = _require_state(root)
+    if state.claims.get(claim.domain) != claim:
+        raise ValueError("learning claim is no longer current")
+    path = root / _claim_path(claim.domain)
+    path.unlink()
+    _fsync_directory(path.parent)
+    return path
 
 
 def learning_validation_errors(root: Path) -> list[str]:
@@ -258,7 +301,8 @@ def learning_validation_errors(root: Path) -> list[str]:
 
 
 def learning_candidate_files(root: Path) -> tuple[Path, ...]:
-    return tuple(_require_state(Path(root)).candidate_files)
+    root = Path(root)
+    return tuple(root / _candidate_path(candidate.candidate_id) for candidate in list_learning_candidates(root))
 
 
 def learning_curated_files(root: Path) -> tuple[Path, ...]:
@@ -268,11 +312,11 @@ def learning_curated_files(root: Path) -> tuple[Path, ...]:
 
 def learning_readable_files(root: Path) -> tuple[Path, ...]:
     state = _require_state(Path(root))
-    return tuple(sorted([*state.candidate_files, *state.curated_files]))
+    return tuple(sorted([*learning_candidate_files(root), *state.curated_files]))
 
 
 def learning_files(root: Path) -> tuple[Path, ...]:
-    """Return every validated regular learning file, including internal receipts."""
+    """Return every validated regular learning file, including internal state."""
     root = Path(root)
     state = _require_state(root)
     receipts = [
@@ -280,7 +324,11 @@ def learning_files(root: Path) -> tuple[Path, ...]:
         for domain in LEARNING_DOMAINS
         for candidate_id in state.receipts[domain]
     ]
-    return tuple(sorted([*state.candidate_files, *state.curated_files, *receipts]))
+    internal = [
+        *(root / _withdrawn_path(candidate_id) for candidate_id in state.withdrawn),
+        *(root / _claim_path(domain) for domain in state.claims),
+    ]
+    return tuple(sorted([*state.candidate_files, *state.curated_files, *receipts, *internal]))
 
 
 def is_learning_path(relative_path: str) -> bool:
@@ -288,13 +336,24 @@ def is_learning_path(relative_path: str) -> bool:
     parts = _path_parts(relative_path)
     return parts is not None and (
         _is_candidate_path(parts)
+        or _is_receipt_path(parts)
+        or _is_withdrawn_path(parts)
+        or _is_claim_path(parts)
         or any(learning_write_path(domain, relative_path) for domain in LEARNING_DOMAINS)
     )
 
 
 def is_learning_evidence_path(relative_path: str) -> bool:
     parts = _path_parts(relative_path)
-    return parts is not None and (_is_candidate_path(parts) or _is_receipt_path(parts))
+    return parts is not None and (
+        _is_candidate_path(parts) or _is_receipt_path(parts) or _is_withdrawn_path(parts)
+    )
+
+
+def is_learning_state_path(relative_path: str) -> bool:
+    """Program-owned candidate, receipt, withdrawal or claim; never model output."""
+    parts = _path_parts(relative_path)
+    return is_learning_evidence_path(relative_path) or (parts is not None and _is_claim_path(parts))
 
 
 def merge_learning_evidence(relative_path: str, *versions: str | bytes) -> str:
@@ -331,28 +390,28 @@ def learning_evidence_sha256(root: Path) -> str:
     entries = [
         (path.relative_to(root).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest())
         for path in learning_files(root)
-        if is_learning_evidence_path(path.relative_to(root).as_posix())
+        if is_learning_state_path(path.relative_to(root).as_posix())
     ]
     return _sha256(json.dumps(entries, ensure_ascii=False, separators=(",", ":")))
 
 
 def learning_write_path(domain: str, relative_path: str) -> bool:
-    """Recognize domain-owned content and receipts, never raw candidate edits."""
+    """Recognize curator-owned content; all candidate lifecycle files are program-owned."""
     _require_domain(domain)
     parts = _path_parts(relative_path)
     if parts is None or len(parts) < 3 or parts[0] != LEARNING_DIRECTORY:
         return False
-    if _is_receipt_path(parts):
-        return parts[2] == domain
     if domain == "guidance":
         return parts[1] == "guidance" and parts[-1].endswith(".md")
+    if domain == "memory":
+        return False
     return (parts[1] == "experiences" and parts[-1].endswith(".md")) or (
         parts[1] == "skills" and len(parts) >= 4 and _SLUG_RE.fullmatch(parts[2]) is not None
     )
 
 
 def _read_state(root: Path) -> _LearningState:
-    state = _LearningState({}, {domain: {} for domain in LEARNING_DOMAINS}, [], [], [])
+    state = _LearningState({}, {domain: {} for domain in LEARNING_DOMAINS}, {}, {}, [], [], [])
     learning_root = root / LEARNING_DIRECTORY
     if not learning_root.exists() and not learning_root.is_symlink():
         return state
@@ -388,6 +447,16 @@ def _read_state(root: Path) -> _LearningState:
                 if receipt.candidate_id != path.stem:
                     raise ValueError("filename does not match receipt identity")
                 state.receipts[parts[2]][receipt.candidate_id] = receipt
+            elif _is_withdrawn_path(parts):
+                receipt = _parse_receipt(_parse_json(path.read_text(encoding="utf-8")))
+                if receipt.candidate_id != path.stem:
+                    raise ValueError("filename does not match withdrawal identity")
+                state.withdrawn[receipt.candidate_id] = receipt
+            elif _is_claim_path(parts):
+                claim = parse_learning_claim(_parse_json(path.read_text(encoding="utf-8")))
+                if claim.domain != path.stem:
+                    raise ValueError("filename does not match claim domain")
+                state.claims[claim.domain] = claim
             elif any(learning_write_path(domain, relative) for domain in LEARNING_DOMAINS):
                 if path.suffix.lower() == ".md":
                     path.read_text(encoding="utf-8")
@@ -402,20 +471,63 @@ def _read_state(root: Path) -> _LearningState:
         path = root / LEARNING_DIRECTORY / "skills" / slug / "SKILL.md"
         if path not in state.curated_files:
             state.errors.append(f"learning/skills/{slug}: missing regular SKILL.md")
-    all_receipt_ids = set().union(*(receipts.keys() for receipts in state.receipts.values()))
+    all_receipt_ids = set(state.withdrawn).union(*(receipts.keys() for receipts in state.receipts.values()))
     for candidate_id in sorted(all_receipt_ids):
         receipts = [
             state.receipts[domain][candidate_id]
             for domain in LEARNING_DOMAINS
             if candidate_id in state.receipts[domain]
         ]
+        withdrawal = state.withdrawn.get(candidate_id)
+        identities = receipts + ([] if withdrawal is None else [withdrawal])
         candidate = state.candidates.get(candidate_id)
-        expected = _Receipt.from_candidate(candidate) if candidate is not None else receipts[0]
-        if any(receipt != expected for receipt in receipts):
+        expected = _Receipt.from_candidate(candidate) if candidate is not None else identities[0]
+        if any(receipt != expected for receipt in identities):
             state.errors.append(f"learning/processed: receipts do not match candidate {candidate_id}")
-        if candidate is None and len(receipts) != len(LEARNING_DOMAINS):
+        if candidate is None and withdrawal is None and len(receipts) != len(LEARNING_DOMAINS):
             state.errors.append(f"learning/candidates/{candidate_id}.json: missing unprocessed evidence")
+    for domain, claim in state.claims.items():
+        for candidate_id, evidence_hash in zip(claim.candidate_ids, claim.candidate_hashes):
+            if candidate_id not in state.candidates or candidate_id in state.withdrawn:
+                state.errors.append(f"learning/claims/{domain}.json: unavailable candidate {candidate_id}")
+            elif candidate_id in state.receipts[domain]:
+                state.errors.append(f"learning/claims/{domain}.json: candidate already processed {candidate_id}")
+            elif state.candidates[candidate_id].evidence_sha256 != evidence_hash:
+                state.errors.append(f"learning/claims/{domain}.json: candidate evidence changed {candidate_id}")
     return state
+
+
+def parse_learning_claim(data: object) -> LearningClaim:
+    _require_fields(data, set(LearningClaim.__dataclass_fields__), "learning claim")
+    assert isinstance(data, dict)
+    domain = data["domain"]
+    _require_domain(domain)
+    for name in ("holder", "token"):
+        if not isinstance(data[name], str) or re.fullmatch(r"[0-9a-f]{32}", data[name]) is None:
+            raise ValueError(f"invalid learning claim {name}")
+    task_id = data["task_id"]
+    if not isinstance(task_id, str) or re.fullmatch(rf"{domain}-[0-9a-f]{{32}}", task_id) is None:
+        raise ValueError("invalid learning claim task id")
+    base = data["base_commit"]
+    if not isinstance(base, str) or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base) is None:
+        raise ValueError("invalid learning claim base commit")
+    mode = data["mode"]
+    if not isinstance(mode, str) or mode not in {"update", "maintain"} or not isinstance(data["scope"], str):
+        raise ValueError("invalid learning claim task scope")
+    ids = data["candidate_ids"]
+    if not isinstance(ids, (list, tuple)):
+        raise ValueError("learning claim candidate ids must be a list")
+    ids = _candidate_ids(ids)
+    if len(ids) != len(data["candidate_ids"]):
+        raise ValueError("learning claim candidate ids must be unique")
+    if (mode == "update") != bool(ids):
+        raise ValueError("only candidate updates claim a non-empty evidence batch")
+    hashes = data["candidate_hashes"]
+    if not isinstance(hashes, (tuple, list)) or len(hashes) != len(ids):
+        raise ValueError("learning claim evidence hashes must match its candidates")
+    if any(not isinstance(value, str) or _ID_RE.fullmatch(value) is None for value in hashes):
+        raise ValueError("invalid learning claim evidence hash")
+    return LearningClaim(domain, data["holder"], data["token"], task_id, base, ids, tuple(hashes), mode, data["scope"])
 
 
 def _require_state(root: Path) -> _LearningState:
@@ -508,10 +620,10 @@ def _require_candidate_id(candidate_id: str) -> None:
 def _candidate_ids(values: Iterable[str]) -> tuple[str, ...]:
     if isinstance(values, str):
         raise ValueError("candidate_ids must be a collection of candidate ids")
-    result = tuple(dict.fromkeys(values))
+    result = tuple(values)
     for value in result:
         _require_candidate_id(value)
-    return result
+    return tuple(dict.fromkeys(result))
 
 
 def _candidate_path(candidate_id: str) -> str:
@@ -520,6 +632,14 @@ def _candidate_path(candidate_id: str) -> str:
 
 def _receipt_path(domain: str, candidate_id: str) -> str:
     return f"learning/processed/{domain}/{candidate_id}.json"
+
+
+def _withdrawn_path(candidate_id: str) -> str:
+    return f"learning/withdrawn/{candidate_id}.json"
+
+
+def _claim_path(domain: str) -> str:
+    return f"learning/claims/{domain}.json"
 
 
 def _fully_processed(state: _LearningState, receipt: _Receipt) -> bool:
@@ -532,7 +652,7 @@ def _existing_submission(state: _LearningState, expected: _Receipt) -> LearningS
     actual = (
         _Receipt.from_candidate(candidate)
         if candidate is not None
-        else next(
+        else state.withdrawn.get(candidate_id) or next(
             (
                 state.receipts[domain][candidate_id]
                 for domain in LEARNING_DOMAINS
@@ -545,16 +665,17 @@ def _existing_submission(state: _LearningState, expected: _Receipt) -> LearningS
         return None
     if actual != expected:
         raise ValueError("learning request id was already submitted with different evidence")
-    return LearningSubmission(
-        candidate_id,
-        False,
-        tuple(domain for domain in LEARNING_DOMAINS if candidate_id not in state.receipts[domain]),
+    pending = () if candidate_id in state.withdrawn else tuple(
+        domain for domain in LEARNING_DOMAINS if candidate_id not in state.receipts[domain]
     )
+    status = "withdrawn" if candidate_id in state.withdrawn else ("pending" if pending else "completed")
+    return LearningSubmission(candidate_id, False, pending, status)
 
 
 def _require_clean_identity(root: Path, candidate_id: str) -> None:
     paths = [
         _candidate_path(candidate_id),
+        _withdrawn_path(candidate_id),
         *(_receipt_path(domain, candidate_id) for domain in LEARNING_DOMAINS),
     ]
     changed = _git(root, "diff", "--name-only", "-z", "HEAD", "--", *paths)
@@ -593,13 +714,27 @@ def _is_receipt_path(parts: tuple[str, ...]) -> bool:
     )
 
 
+def _is_withdrawn_path(parts: tuple[str, ...]) -> bool:
+    return (
+        len(parts) == 3 and parts[:2] == ("learning", "withdrawn")
+        and parts[2].endswith(".json") and _ID_RE.fullmatch(parts[2][:-5]) is not None
+    )
+
+
+def _is_claim_path(parts: tuple[str, ...]) -> bool:
+    return (
+        len(parts) == 3 and parts[:2] == ("learning", "claims")
+        and parts[2].endswith(".json") and parts[2][:-5] in LEARNING_DOMAINS
+    )
+
+
 def _valid_directory(parts: tuple[str, ...]) -> bool:
     if parts == ("learning",):
         return True
     if len(parts) < 2 or parts[0] != "learning":
         return False
     kind = parts[1]
-    if kind == "candidates":
+    if kind in {"candidates", "withdrawn", "claims"}:
         return len(parts) == 2
     if kind == "processed":
         return len(parts) == 2 or (len(parts) == 3 and parts[2] in LEARNING_DOMAINS)

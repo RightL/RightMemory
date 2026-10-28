@@ -124,7 +124,7 @@ class SyncSchedulingTests(SyncTestBase):
             encoding="utf-8",
         )
 
-        result = manager.background_pull()
+        result = manager.background_sync()
 
         self.assertEqual(result.status, "fresh")
 
@@ -149,7 +149,7 @@ class SyncSchedulingTests(SyncTestBase):
                 enabled=True,
                 stale_pull_after_hours=24,
             )
-        ).background_pull()
+        ).background_sync()
 
         self.assertEqual(result.status, "synced")
         self.assertIn("remote-work", (self.device / "PURSUITS.md").read_text(encoding="utf-8"))
@@ -174,7 +174,7 @@ class SyncSchedulingTests(SyncTestBase):
                 enabled=True,
                 stale_pull_after_hours=24,
             )
-        ).background_pull()
+        ).background_sync()
 
         self.assertEqual(result.status, "pushed")
         self._git(self.other, "fetch", "origin")
@@ -219,7 +219,7 @@ class SyncSchedulingTests(SyncTestBase):
                 enabled=True,
                 stale_pull_after_hours=24,
             )
-        ).background_pull()
+        ).background_sync()
 
         self.assertEqual(result.status, "conflict")
         self.assertEqual(result.files, ["MEMORY.md"])
@@ -243,7 +243,7 @@ class SyncSchedulingTests(SyncTestBase):
                 enabled=True,
                 stale_pull_after_hours=24,
             )
-        ).background_pull()
+        ).background_sync()
 
         self.assertEqual(result.status, "dirty")
         self.assertEqual(result.files, ["MEMORY.md"])
@@ -289,6 +289,6 @@ class SyncSchedulingTests(SyncTestBase):
             encoding="utf-8",
         )
 
-        result = manager.background_pull()
+        result = manager.background_sync()
 
         self.assertEqual(result.status, "synced")

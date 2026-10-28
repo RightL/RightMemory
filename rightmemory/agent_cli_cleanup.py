@@ -10,7 +10,6 @@ from .platform import lock_file, unlock_file
 from .provider_prefixes import ProviderPrefixStore
 from .provider_sessions import ProviderSessionStore
 from .provider_threads import ProviderThreadLease, ProviderThreadRecord, ProviderThreadStore
-from .recent_submitted import RecentSubmittedMemoryDeliveryStore
 from .retrieve_context import RetrieveContextStore
 from .session import MessageSessionStore, _ensure_runtime_gitignore
 
@@ -266,9 +265,6 @@ class AgentCliThreadCleanup:
                 )
                 if mapping_removed and current.role == "retrieve":
                     RetrieveContextStore(self.memory_root).reset(current.rightmemory_session_id)
-                    RecentSubmittedMemoryDeliveryStore(self.memory_root).reset(
-                        current.rightmemory_session_id
-                    )
                 record = self.store.mark_delete_pending(current, attempted_at=attempted_at)
                 return _PreparedProviderThread(record, lease)
         except BaseException:

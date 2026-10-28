@@ -868,7 +868,7 @@ async function renderStatus() {
       }
     </section>
     ${renderStatusSection("Insight", status.insight)}
-    ${renderStatusSection("Async Update", status.update, true)}
+    ${renderStatusSection("Curation", status.curation, true)}
   `;
 }
 
@@ -923,7 +923,6 @@ async function renderSettings() {
       </div>
       <div class="settings-grid">
         ${settingTile("Config", settings.config_exists ? "rightmemory.toml found" : "Using defaults", settings.config_path)}
-        ${runtimeTile("Update Queue", settings.runtime?.update)}
         ${runtimeTile("Insight", settings.runtime?.insight_watch)}
         ${runtimeTile("Pruner", settings.runtime?.pruner)}
         ${runtimeTile("Sync", settings.runtime?.sync)}
@@ -1000,13 +999,6 @@ function runtimeTile(title, wrapper) {
   }
   if (typeof value.generation_commits !== "undefined") {
     return settingTile(title, `${value.generation_commits} commits`, `${value.revival_grace_checkpoints} revival checkpoints`);
-  }
-  if (typeof value.target_batch_candidates !== "undefined") {
-    return settingTile(
-      title,
-      `${value.trigger_candidates} trigger / ${value.target_batch_candidates} target`,
-      `${value.max_wait_seconds}s max wait`,
-    );
   }
   return settingTile(title, "Configured");
 }

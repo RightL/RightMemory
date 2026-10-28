@@ -16,11 +16,11 @@ from typing import Any
 
 from .agent_cli import CliAgentExecutor, NO_SESSION_RIGHTMEMORY_SESSION_ID
 from .codex_sdk import CodexSdkRunner
-from .async_update import AsyncUpdateStore
 from .automatic_effects import (
+    advance_effect_watermark as _advance_effect_watermark,
+    apply_memory_operation_effect,
     forget_memory_change_pressure_operation,
     memory_change_pressure_points,
-    record_memory_change_pressure_once,
 )
 from .config import CURATOR_ROLES, PrunerConfig, RuntimeConfig, load_config
 from .debug import DebugTrace
@@ -29,7 +29,6 @@ from .prompt import build_instructions
 from .prune import build_pruner_message, prune_due_status
 from .provider_sessions import ProviderSessionStore
 from .provider_threads import ProviderThreadStore
-from .recent_submitted import RecentSubmittedMemoryEntry, collect_recent_submitted_memory
 from .retrieve_context import (
     RetrieveContextStore,
     build_retrieve_request_text,
@@ -37,7 +36,6 @@ from .retrieve_context import (
     format_current_material_block,
     format_memory_diff_block,
     format_query_block,
-    format_recent_submitted_context_block,
     format_updated_material_block,
     load_daily_snapshot,
     memory_diff_since,
@@ -52,7 +50,6 @@ from .retrieve_selection import (
 from .session import (
     MemoryWriteLock,
     MessageSessionStore,
-    UpdateExecutionLock,
     _ensure_durable_directory,
     _ensure_runtime_gitignore,
     _fsync_directory,
@@ -74,8 +71,6 @@ from .sync import (
     schedule_deferred_sync,
 )
 from .tools import MemoryTools
-from .update_queue import UpdateCandidate, UpdateQueueStore
-from .update_record import UpdateRecord, UpdateRecordStore
 
 
 AUTOMATIC_WRITE_ROLES = {"insight", "pruner", "update"} | CURATOR_ROLES
@@ -114,8 +109,6 @@ class PreparedRetrieveTurn:
     query: str
     context_parts: tuple[str, ...]
     prefix_context: str | None
-    recent_submitted_entries: list[RecentSubmittedMemoryEntry]
-    visible_recent_candidates: dict[str, str]
     memory_commit: str | None
     model_history_json: bytes | None
 
@@ -189,20 +182,18 @@ class RightMemoryRuntime:
     @_complete_retrieve_sync
     def run_turn(self, message: str, *, operation_id: str | None = None) -> str:
         if self.config.role in AUTOMATIC_WRITE_ROLES:
-            with self._update_execution_lock():
-                self._last_write_result = None
-                turn_kwargs: dict[str, object] = {"allow_internal_session": True}
-                if operation_id is not None:
-                    turn_kwargs["operation_id"] = operation_id
-                output = self._run_session_turn_unlocked(
-                    NO_SESSION_RIGHTMEMORY_SESSION_ID,
-                    message,
-                    **turn_kwargs,
-                )
-                return output
-        with self._update_execution_lock():
             self._last_write_result = None
-            return self._run_turn_unlocked(message)
+            turn_kwargs: dict[str, object] = {"allow_internal_session": True}
+            if operation_id is not None:
+                turn_kwargs["operation_id"] = operation_id
+            output = self._run_session_turn_unlocked(
+                NO_SESSION_RIGHTMEMORY_SESSION_ID,
+                message,
+                **turn_kwargs,
+            )
+            return output
+        self._last_write_result = None
+        return self._run_turn_unlocked(message)
 
     @_complete_retrieve_sync
     def run_chat_turn(
@@ -220,9 +211,8 @@ class RightMemoryRuntime:
             return self.run_session_turn(session_id, message)
         if self._should_isolate_write_turn():
             return self.run_turn(message, operation_id=operation_id)
-        with self._update_execution_lock():
-            self._last_write_result = None
-            return self._run_cli_process_turn_unlocked(message)
+        self._last_write_result = None
+        return self._run_cli_process_turn_unlocked(message)
 
     def _run_turn_unlocked(self, message: str) -> str:
         if not message.strip():
@@ -292,19 +282,15 @@ class RightMemoryRuntime:
         on_started: Callable[[], None] | None = None,
         include_returned: bool = False,
         operation_id: str | None = None,
-        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ) -> str:
-        with self._update_execution_lock():
-            self._last_write_result = None
-            turn_kwargs: dict[str, object] = {
-                "on_started": on_started,
-                "include_returned": include_returned,
-            }
-            if operation_id is not None:
-                turn_kwargs["operation_id"] = operation_id
-            if update_candidates is not None:
-                turn_kwargs["update_candidates"] = update_candidates
-            return self._run_session_turn_unlocked(session_id, message, **turn_kwargs)
+        self._last_write_result = None
+        turn_kwargs: dict[str, object] = {
+            "on_started": on_started,
+            "include_returned": include_returned,
+        }
+        if operation_id is not None:
+            turn_kwargs["operation_id"] = operation_id
+        return self._run_session_turn_unlocked(session_id, message, **turn_kwargs)
 
     def prepare_session_turn_external(
         self,
@@ -313,23 +299,20 @@ class RightMemoryRuntime:
         *,
         operation_id: str,
         external_finalizer: str,
-        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ) -> IsolatedWriteResult:
         """Prepare an isolated semantic turn without landing it in the active root."""
         if not self._should_isolate_write_turn():
             raise RuntimeError("external finalization requires an isolated automatic-write role")
-        with self._update_execution_lock():
-            self._last_write_result = None
-            self._run_session_turn_isolated(
-                session_id,
-                message,
-                operation_id=operation_id,
-                external_finalizer=external_finalizer,
-                update_candidates=update_candidates,
-            )
-            if self._last_write_result is None or not self._last_write_result.prepared:
-                raise RuntimeError("external semantic turn did not produce a prepared result")
-            return self._last_write_result
+        self._last_write_result = None
+        self._run_session_turn_isolated(
+            session_id,
+            message,
+            operation_id=operation_id,
+            external_finalizer=external_finalizer,
+        )
+        if self._last_write_result is None or not self._last_write_result.prepared:
+            raise RuntimeError("external semantic turn did not produce a prepared result")
+        return self._last_write_result
 
     def complete_session_turn_external(
         self,
@@ -340,26 +323,25 @@ class RightMemoryRuntime:
         landed_commit: str,
     ) -> str:
         """Confirm external publication, then apply local operation effects."""
-        with self._update_execution_lock():
-            supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
-            result = supervisor.complete_external(
-                operation_id,
-                external_finalizer=external_finalizer,
-                landed_commit=landed_commit,
-            )
-            self._last_write_result = result
-            state = _IsolatedStateOverlay(
-                self.config.state_root,
-                self.config.role,
-                session_id,
-                operation_id=operation_id,
-                seed_provider_session=self.config.runtime_mode != "cli-agent",
-            )
-            with self.sessions.locked(session_id):
-                self._run_operation_effects(operation_id, state, effect_names={STATE_EFFECT})
-            self._run_operation_effects(operation_id, state, exclude_effects={STATE_EFFECT})
-            self._retry_pending_operation_effects(exclude=operation_id)
-            return str(result.output)
+        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+        result = supervisor.complete_external(
+            operation_id,
+            external_finalizer=external_finalizer,
+            landed_commit=landed_commit,
+        )
+        self._last_write_result = result
+        state = _IsolatedStateOverlay(
+            self.config.state_root,
+            self.config.role,
+            session_id,
+            operation_id=operation_id,
+            seed_provider_session=self.config.runtime_mode != "cli-agent",
+        )
+        with self.sessions.locked(session_id):
+            self._run_operation_effects(operation_id, state, effect_names={STATE_EFFECT})
+        self._run_operation_effects(operation_id, state, exclude_effects={STATE_EFFECT})
+        self._retry_pending_operation_effects(exclude=operation_id)
+        return str(result.output)
 
     def restart_session_turn_external(
         self,
@@ -370,26 +352,25 @@ class RightMemoryRuntime:
         reason: str,
     ) -> None:
         """Reset a prepared turn after its semantic base loses the Git fence."""
-        with self._update_execution_lock():
-            supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
-            supervisor.restart_external(
-                operation_id,
-                external_finalizer=external_finalizer,
-                reason=reason,
-            )
-            store = SemanticOperationStore(self.config.memory_root)
-            store.clear_effect_state(operation_id, PUBLISH_EFFECT)
-            state = _IsolatedStateOverlay(
-                self.config.state_root,
-                self.config.role,
-                session_id,
-                operation_id=operation_id,
-                seed_provider_session=self.config.runtime_mode != "cli-agent",
-            )
-            try:
-                state.archive_failed_provider_session()
-            finally:
-                state.cleanup()
+        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+        supervisor.restart_external(
+            operation_id,
+            external_finalizer=external_finalizer,
+            reason=reason,
+        )
+        store = SemanticOperationStore(self.config.memory_root)
+        store.clear_effect_state(operation_id, PUBLISH_EFFECT)
+        state = _IsolatedStateOverlay(
+            self.config.state_root,
+            self.config.role,
+            session_id,
+            operation_id=operation_id,
+            seed_provider_session=self.config.runtime_mode != "cli-agent",
+        )
+        try:
+            state.archive_failed_provider_session()
+        finally:
+            state.cleanup()
 
     def supersede_session_turn_external(
         self,
@@ -400,26 +381,25 @@ class RightMemoryRuntime:
         landed_commit: str,
     ) -> None:
         """Discard local prepared effects after another lease owner publishes."""
-        with self._update_execution_lock():
-            supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
-            supervisor.supersede_external(
-                operation_id,
-                external_finalizer=external_finalizer,
-                landed_commit=landed_commit,
-            )
-            store = SemanticOperationStore(self.config.memory_root)
-            store.clear_effect_state(operation_id, PUBLISH_EFFECT)
-            state = _IsolatedStateOverlay(
-                self.config.state_root,
-                self.config.role,
-                session_id,
-                operation_id=operation_id,
-                seed_provider_session=self.config.runtime_mode != "cli-agent",
-            )
-            try:
-                state.archive_failed_provider_session()
-            finally:
-                state.cleanup()
+        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+        supervisor.supersede_external(
+            operation_id,
+            external_finalizer=external_finalizer,
+            landed_commit=landed_commit,
+        )
+        store = SemanticOperationStore(self.config.memory_root)
+        store.clear_effect_state(operation_id, PUBLISH_EFFECT)
+        state = _IsolatedStateOverlay(
+            self.config.state_root,
+            self.config.role,
+            session_id,
+            operation_id=operation_id,
+            seed_provider_session=self.config.runtime_mode != "cli-agent",
+        )
+        try:
+            state.archive_failed_provider_session()
+        finally:
+            state.cleanup()
 
     def supersede_running_session_turn(
         self,
@@ -429,26 +409,25 @@ class RightMemoryRuntime:
         landed_commit: str,
     ) -> None:
         """Discard abandoned local execution after its Git batch became terminal."""
-        with self._update_execution_lock():
-            supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
-            supervisor.supersede_running(
-                operation_id,
-                landed_commit=landed_commit,
-                reason="superseded by a terminal synchronized queue transaction",
-            )
-            store = SemanticOperationStore(self.config.memory_root)
-            store.clear_effect_state(operation_id, PUBLISH_EFFECT)
-            state = _IsolatedStateOverlay(
-                self.config.state_root,
-                self.config.role,
-                session_id,
-                operation_id=operation_id,
-                seed_provider_session=self.config.runtime_mode != "cli-agent",
-            )
-            try:
-                state.archive_failed_provider_session()
-            finally:
-                state.cleanup()
+        supervisor = IsolatedWriteSupervisor(self.config.memory_root, self.config.role)
+        supervisor.supersede_running(
+            operation_id,
+            landed_commit=landed_commit,
+            reason="superseded by a terminal synchronized queue transaction",
+        )
+        store = SemanticOperationStore(self.config.memory_root)
+        store.clear_effect_state(operation_id, PUBLISH_EFFECT)
+        state = _IsolatedStateOverlay(
+            self.config.state_root,
+            self.config.role,
+            session_id,
+            operation_id=operation_id,
+            seed_provider_session=self.config.runtime_mode != "cli-agent",
+        )
+        try:
+            state.archive_failed_provider_session()
+        finally:
+            state.cleanup()
 
     def _run_session_turn_unlocked(
         self,
@@ -459,7 +438,6 @@ class RightMemoryRuntime:
         allow_internal_session: bool = False,
         include_returned: bool = False,
         operation_id: str | None = None,
-        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ) -> str:
         if not message.strip():
             raise ValueError("message must not be empty")
@@ -490,8 +468,6 @@ class RightMemoryRuntime:
                 operation_kwargs: dict[str, object] = {}
                 if operation_id is not None:
                     operation_kwargs["operation_id"] = operation_id
-                if update_candidates is not None:
-                    operation_kwargs["update_candidates"] = update_candidates
                 if on_started is None:
                     isolated_callback = lambda: self._run_session_turn_isolated(
                         session_id,
@@ -810,7 +786,6 @@ class RightMemoryRuntime:
         )
         return renderer.render(
             selection,
-            recent_entries=prepared.recent_submitted_entries,
         )
 
     def _retrieve_message_history(self, prepared: PreparedRetrieveTurn) -> list[Any]:
@@ -855,7 +830,6 @@ class RightMemoryRuntime:
         on_started: Callable[[], None] | None = None,
         operation_id: str | None = None,
         external_finalizer: str | None = None,
-        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ):
         def run_in_operation(worktree: Path, state_root: Path):
             if on_started is None:
@@ -874,7 +848,6 @@ class RightMemoryRuntime:
             {"kind": "semantic-turn", "message": message},
             run_in_operation,
             external_finalizer=external_finalizer,
-            update_candidates=update_candidates,
         )
 
     def _run_prune_turn_isolated(
@@ -904,27 +877,12 @@ class RightMemoryRuntime:
         run_in_operation: Callable[[Path, Path], Any],
         *,
         external_finalizer: str | None = None,
-        update_candidates: tuple[UpdateCandidate, ...] | None = None,
     ):
         clean_operation_id = operation_id or f"{self.config.role}-{uuid.uuid4().hex}"
-        update_record = None
-        if update_candidates is not None:
-            if self.config.role != "update":
-                raise ValueError("retained update candidates require the update role")
-            update_record = UpdateRecord.from_candidates(update_candidates)
-            if update_record.operation_id != clean_operation_id:
-                raise ValueError(
-                    "update operation id does not match its retained candidate batch"
-                )
         operation_input = {
             **operation_input,
             "role": self.config.role,
             "session_id": session_id,
-            **(
-                {"update_record": update_record.to_data()}
-                if update_record is not None
-                else {}
-            ),
         }
         pressure_points = (
             memory_change_pressure_points(self.config.memory_root)
@@ -969,21 +927,6 @@ class RightMemoryRuntime:
                         pressure_points=pressure_points,
                     ),
                     prepare_effects=self._prepare_operation_effects,
-                    prepare_managed_artifacts=(
-                        lambda worktree, base_commit, candidate_commit, changed_paths, output: (
-                            self._prepare_update_artifacts(
-                                clean_operation_id,
-                                update_record,
-                                worktree,
-                                base_commit,
-                                candidate_commit,
-                                changed_paths,
-                                str(output),
-                            )
-                        )
-                    )
-                    if self.config.role == "update"
-                    else None,
                     external_finalizer=external_finalizer,
                 )
                 self._last_write_result = result
@@ -1174,36 +1117,7 @@ class RightMemoryRuntime:
         if effect.name == STATE_EFFECT:
             state.promote_if_current(record.operation_id, outcome.sequence)
             return
-        if effect.name == PRESSURE_EFFECT:
-            insight_points = effect.metadata.get("insight_points")
-            if (
-                not isinstance(insight_points, (int, float))
-                or isinstance(insight_points, bool)
-                or insight_points <= 0
-            ):
-                raise ValueError("memory-pressure effect requires positive point values")
-            record_memory_change_pressure_once(
-                self.config.memory_root,
-                record.operation_id,
-                insight_points=float(insight_points),
-            )
-            return
-        if effect.name == PUBLISH_EFFECT:
-            store = SemanticOperationStore(self.config.memory_root)
-            with store.publish_locked():
-                if not _advance_effect_watermark(
-                    self.config.memory_root,
-                    "file-view-publish",
-                    record.operation_id,
-                    outcome.sequence,
-                ):
-                    return
-                self._publish_file_views_after_write(
-                    raise_on_failure=True,
-                    operation_id=record.operation_id,
-                )
-            return
-        raise ValueError(f"unknown semantic operation effect: {effect.name}")
+        apply_memory_operation_effect(self.config.memory_root, record, effect)
 
     def _retry_pending_operation_effects(self, *, exclude: str) -> None:
         store = SemanticOperationStore(self.config.memory_root)
@@ -1549,8 +1463,6 @@ class RightMemoryRuntime:
                 query=message,
                 context_parts=(),
                 prefix_context=None,
-                recent_submitted_entries=[],
-                visible_recent_candidates={},
                 memory_commit=None,
                 model_history_json=None,
             )
@@ -1573,37 +1485,6 @@ class RightMemoryRuntime:
         diff = memory_diff_since(self.config.memory_root, base_commit, current_commit)
         diff_block = format_memory_diff_block(diff)
 
-        entries = collect_recent_submitted_memory(self.config.memory_root)
-        current_visible = {
-            entry.key: f"{entry.update_session_id}:{entry.candidate_id}"
-            for entry in entries
-        }
-        new_recent_entries = (
-            entries
-            if new_conversation
-            else [
-                entry
-                for entry in entries
-                if entry.key not in state.visible_recent_candidates
-            ]
-        )
-        current_selection_ids = set(current_visible.values())
-        no_longer_pending = (
-            []
-            if new_conversation
-            else sorted(
-                {
-                    selection_id
-                    for key, selection_id in state.visible_recent_candidates.items()
-                    if key not in current_visible
-                    and selection_id not in current_selection_ids
-                }
-            )
-        )
-        recent_block = format_recent_submitted_context_block(
-            new_recent_entries,
-            no_longer_pending=no_longer_pending,
-        )
         renderer = RetrieveSelectionRenderer(
             self.config.memory_root,
             max_output_chars=self.config.retrieve_max_output_chars,
@@ -1611,19 +1492,16 @@ class RightMemoryRuntime:
         updated_block = format_updated_material_block(
             renderer.changed_delivery_labels(
                 state.delivery_coverage,
-                recent_entries=entries,
             )
         )
         current_material_block = ""
         if include_returned:
             current_selection = renderer.current_delivery_selection(
                 state.delivery_coverage,
-                recent_entries=entries,
             )
             if (
                 current_selection.ids
                 or current_selection.sources
-                or current_selection.recent_candidates
             ):
                 context_renderer = RetrieveSelectionRenderer(
                     self.config.memory_root,
@@ -1631,7 +1509,6 @@ class RightMemoryRuntime:
                 )
                 current_material = context_renderer.render(
                     current_selection,
-                    recent_entries=entries,
                 )
                 current_material_block = format_current_material_block(
                     current_material.text
@@ -1644,7 +1521,6 @@ class RightMemoryRuntime:
             for part in (
                 snapshot.text if new_conversation and prefix_context is None else "",
                 diff_block,
-                recent_block,
                 format_learning_index(self.config.memory_root),
                 updated_block,
                 current_material_block,
@@ -1660,8 +1536,6 @@ class RightMemoryRuntime:
             query=message,
             context_parts=context_parts,
             prefix_context=prefix_context,
-            recent_submitted_entries=entries,
-            visible_recent_candidates=current_visible,
             memory_commit=current_commit,
             model_history_json=(
                 state.model_history_json
@@ -1682,7 +1556,6 @@ class RightMemoryRuntime:
             session_id,
             memory_commit=prepared.memory_commit,
             model_history_json=completed.model_history_json,
-            visible_recent_candidates=prepared.visible_recent_candidates,
             delivery=completed.rendered.delivery,
         )
 
@@ -1710,13 +1583,11 @@ class RightMemoryRuntime:
 
         if result.status in {"synced", "ahead"}:
             try:
-                queue_store = UpdateQueueStore(self.config.memory_root)
-                snapshot = queue_store.snapshot()
-                if snapshot.candidates or queue_store.outbox_candidates():
-                    AsyncUpdateStore(self.config.memory_root, "update").wake_worker()
+                from .curation_worker import wake_configured_curation
+                wake_configured_curation(self.config.memory_root)
             except Exception as exc:
                 print(
-                    f"warning: could not wake update worker after retrieve sync: {exc}",
+                    f"warning: could not wake curation worker after retrieve sync: {exc}",
                     file=sys.stderr,
                 )
 
@@ -1735,6 +1606,10 @@ class RightMemoryRuntime:
         raise_on_failure: bool = False,
         operation_id: str | None = None,
     ) -> None:
+        if self.config.memory_root.resolve() != self.config.state_root.resolve():
+            # A prepared curator worktree is unpublished; its coordinator owns
+            # publication and the durable effect outbox after the claim lands.
+            return
         if self.config.role not in AUTOMATIC_WRITE_ROLES or self.config.role in CURATOR_ROLES:
             return
         if operation_id is None:
@@ -1832,7 +1707,7 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.read_command),
             self._agent_tool(self.tools.outline_file),
         ]
-        if self.config.role in CURATOR_ROLES:
+        if self.config.role in CURATOR_ROLES | {"update"}:
             read_tools.extend([
                 self._agent_tool(self.tools.read_learning),
                 self._agent_tool(self.tools.search_learning),
@@ -1910,25 +1785,6 @@ class RightMemoryRuntime:
 
         return UsageLimits(request_limit=MODEL_REQUEST_LIMIT)
 
-    def _update_execution_lock(self):
-        if self.config.role == "update":
-            return UpdateExecutionLock(self.config.memory_root)
-        return nullcontext()
-
-    def _prepare_update_artifacts(
-        self,
-        _origin_operation_id: str,
-        update_record: UpdateRecord | None,
-        worktree: Path,
-        _base_commit: str,
-        _candidate_commit: str | None,
-        _changed_paths: tuple[str, ...],
-        _summary: str,
-    ) -> tuple[str, ...]:
-        if update_record is not None:
-            path = UpdateRecordStore(worktree).write(update_record)
-            return (path.relative_to(worktree).as_posix(),)
-        return ()
 
     @property
     def last_write_result(self) -> IsolatedWriteResult | None:
@@ -2114,30 +1970,6 @@ class _IsolatedStateOverlay:
         if not root.exists():
             return []
         return [path.relative_to(self.overlay_root) for path in sorted(root.glob("*/*.json"))]
-
-
-def _advance_effect_watermark(
-    state_root: Path,
-    effect_name: str,
-    operation_id: str,
-    sequence: int,
-) -> bool:
-    path = state_root / ".runtime" / "operations" / "effects" / f"{effect_name}.json"
-    current_key: tuple[int, str] | None = None
-    if path.exists():
-        data = json.loads(path.read_text(encoding="utf-8"))
-        current_id = data.get("operation_id") if isinstance(data, dict) else None
-        current_sequence = data.get("sequence") if isinstance(data, dict) else None
-        if not isinstance(current_id, str) or type(current_sequence) is not int or current_sequence < 1:
-            raise ValueError(f"invalid semantic effect watermark: {path}")
-        current_key = (current_sequence, current_id)
-    if current_key is not None and current_key > (sequence, operation_id):
-        return False
-    _write_state_json_file(
-        {"operation_id": operation_id, "sequence": sequence},
-        path,
-    )
-    return True
 
 
 def _copy_state_file(source: Path, destination: Path) -> None:

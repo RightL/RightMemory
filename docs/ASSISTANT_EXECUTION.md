@@ -1,107 +1,87 @@
 # Assistant Execution
 
-RightMemory can use the current assistant's native agents for memory work. The main agent submits evidence and delegates ready batches. Retrieve inspects real memory and learning sources; Memory Update and the guidance and skills curators edit isolated Git worktrees. RightMemory performs deterministic queue, validation, publication, and recovery operations without creating a model client.
+RightMemory can use the current assistant's native agents for retrieval and curation. The main agent submits evidence once and delegates ready domains. Retrieve inspects real sources; Memory, guidance, and skills curators edit isolated Git worktrees. RightMemory controls evidence, claims, validation, publication, and recovery without creating a model client.
 
-This path uses one shared [assistant skill](../skills/rightmemory-assistant/SKILL.md), a [Retrieve role](../rightmemory/prompts/assistant-retrieve.md), the [Memory Update role](../rightmemory/prompts/update.md), and the [guidance](../rightmemory/prompts/guidance-curator.md) and [skills](../rightmemory/prompts/skills-curator.md) curator roles. The existing standalone and CLI-agent paths remain available.
+This path uses the shared [assistant skill](../skills/rightmemory-assistant/SKILL.md), a [native Retrieve role](../rightmemory/prompts/assistant-retrieve.md), and the canonical [Memory](../rightmemory/prompts/update.md), [guidance](../rightmemory/prompts/guidance-curator.md), and [skills](../rightmemory/prompts/skills-curator.md) roles. Configured standalone and CLI-agent execution use the same curation lifecycle.
 
 ## Setup
 
-From the repository checkout, run the shared installer with explicit memory and skill directories:
+Run the installer with explicit memory and skill directories:
 
 ```bash
 ./install.sh --mode assistant /absolute/memory-root /absolute/assistant-skills
 ```
 
-On Windows, use `./install.ps1 --mode assistant C:\path\memory C:\path\assistant-skills` in PowerShell. The installer uses Git and uv, provisions Python 3.11+ and the runtime, initializes a new memory root, and installs `rightmemory-assistant` with that root bound plus `maintain-rightmemory`, `maintain-agent-guidance`, and `maintain-work-skills`. Existing complete roots are preserved; incomplete roots are refused before changes. Enable the installed skill using your assistant's supported skill mechanism. The skills directory is an explicit host choice, not automatic dot plugin registration.
+On Windows, use `./install.ps1 --mode assistant C:\path\memory C:\path\assistant-skills` in PowerShell. The installer uses Git and uv, provisions Python 3.11+ and the runtime, initializes a new root, and installs `rightmemory-assistant` plus all three domain maintenance skills. It preserves valid existing roots and refuses invalid current state or unfinished tasks before replacing their runtime. Enable the installed skill through the assistant's supported mechanism.
 
-Use `rightmemory validate --root /absolute/memory-root` to check the root. Replace the new root's example entries with your own state through the normal memory workflow. Re-run the same installer command after updating the checkout. Stop agents and separately configured watchers that can submit evidence before switching execution modes. Finish or cancel pending updates with their original executor first; the installer refuses a switch while it finds their pending work. Use assistant execution rather than an internal Update worker for this root. If an old orchestrator skill was customized and therefore preserved, disable it before enabling the native assistant skill. Standalone and CLI-agent modes use their command-backed daily entry and install the same domain maintenance skills, plus map maintenance and Manager.
+Assistant execution needs no RightMemory model credentials, Codex, or Claude Code. The native agents need filesystem access to the returned sources and worktrees. A remote MCP connection alone does not provide that access; use a common environment or an authorized shared filesystem. Each assistant may use its own synchronized Git checkout.
 
-Assistant execution does not require RightMemory model API credentials, Codex, or Claude Code. The assistant uses its own configured agent. Keep the active root explicit:
+A worktree isolates candidate edits from the active root. The assistant governs its agents' broader file permissions, while RightMemory validates the result it admits. Before changing execution modes, finish current tasks with their existing executor. Consult [UPGRADING](UPGRADING.md) when replacing an older installation with different commands or state.
+
+## Retrieve and Submit
+
+Delegate the retrieval need, bound root, session id, and preparation command to a native Retrieve subagent:
 
 ```bash
 rightmemory assistant --root /absolute/memory-root context --session example-session
 ```
 
-The assistant's native subagents must be able to read the returned memory and pending paths and write the assigned Update worktree. A remote MCP connection does not expose the server's filesystem to native file tools. Place the runtime and native agents in a common accessible environment, or provide an authorized shared filesystem. Each assistant may use its own synchronized Git checkout.
+The subagent reads `instructions_file` and relevant real sources. The context includes graph and fixed correction paths, imported-view mappings, a compact `learning_index_file`, and `learning_root` for further native search. `learning_source_count` reports the collection size. Sources remain live, as indicated by `memory_commit` and `live_files: true`. The subagent returns useful context with attribution; it does not need the internal retriever's terminal selector.
 
-An Update worktree isolates candidate edits from the active root. A working-directory setting alone does not restrict arbitrary native shell access; use the assistant's file permissions where available. RightMemory validates the candidate it admits, while the assistant governs its agents' other file access.
-
-## Read and Submit
-
-The main agent delegates the retrieval need, bound root, session id, and `context` command (or matching MCP tool) to a native Retrieve subagent. That subagent calls `context` and reads its returned instruction file. The result supplies ordinary graph and fixed correction source locations, imported-view mappings, a compact `learning_index_file`, and readable pending evidence. `learning_root` and `legacy_guidance_file` locate the full learning collection for native search; `learning_source_count` reports its size. The observed `memory_commit` and `live_files: true` indicate that sources remain live. The subagent inspects relevant sources with native file tools and returns a useful summary with attribution. This path does not require a `RetrieveSelection` or run the original retrieval renderer.
-
-Save ordinary Memory evidence in a UTF-8 file outside the memory root:
+Use one shared path for user and people context, project understanding, behavioral guidance, corrections, and work experience. Save UTF-8 evidence outside the memory root, then submit:
 
 ```bash
-rightmemory assistant --root /absolute/memory-root submit --session example-session --request-id evidence-1 --file /absolute/evidence.txt
+rightmemory submit --root /absolute/memory-root --session example-session --request-id evidence-1 --file /absolute/evidence.txt --executor native
 ```
 
-Submission records evidence for later reconciliation. It does not start an internal model worker. Retry the same submission with the same request id and content; changed evidence needs a new request id.
+The request id makes an identical retry idempotent; a distinct occurrence gets a new id. Capture useful evidence before demanding a settled generalization, and preserve enough circumstances and uncertainty to interpret it. Submission records the candidate without starting a configured model worker. All three curators independently judge its value under their shared domain cores.
 
-Normal assistant tool responses can carry a batch-ready notice. A Retrieve or other subagent passes that notice to its main agent, which arranges Update. The program owns pending and active batch state; the main agent owns native delegation.
+Pending evidence is immediately available to relevant retrieval. The program removes its raw source after all three domains finish. Useful retained context, cases, and experiences remain in curated sources; processing alone does not turn evidence into a rule.
 
-## Shared Learning
+## Prepare and Complete Curation
 
-Behavioral guidance, user redirections, and potentially reusable work use a shared evidence path, including when the user explicitly asks to remember them:
+Normal tool responses carry readiness and active-task notices. Subagents relay them to the main agent, which owns native delegation. Prepare a new ready domain with:
 
 ```bash
-rightmemory learning --root /absolute/memory-root submit --session example-session --request-id learning-1 --file /absolute/evidence.txt
+rightmemory curate --root /absolute/memory-root begin --domain memory --mode update
+rightmemory curate --root /absolute/memory-root begin --domain guidance --mode update
+rightmemory curate --root /absolute/memory-root begin --domain skills --mode update
 ```
 
-The result and normal tool calls can carry learning-ready notices. The main agent prepares each ready domain without a model client:
+Delegate a newly claimed task with its `instructions_file`, `candidates_file`, and `worktree`. The curator reads the supplied task mode and allowed paths, uses native file tools, validates and commits the result, then calls its returned completion command. Keep the active-root binding even when the command runs from the worktree.
 
 ```bash
-rightmemory learning --root /absolute/memory-root begin --domain guidance --mode update
-rightmemory learning --root /absolute/memory-root begin --domain skills --mode update
+rightmemory curate --root /absolute/memory-root complete --task TASK
+rightmemory curate --root /absolute/memory-root status --task TASK
 ```
 
-Delegate a newly claimed task. For an active task, do not launch another worker; after interruption, confirm the prior worker stopped and resume the same task and worktree. Use the explicit retry command if its edits must be abandoned or its base is stale. Supply its `instructions_file`, `candidates_file`, and isolated `worktree`; the curator uses native file tools and the shared domain core. It validates and commits allowed changes, then uses the returned completion command:
+`--output-file FILE` can attach the agent's summary. A worktree commit is candidate work; the completion receipt establishes publication. An unchanged reconciliation still completes processing. Updates use bounded batches, with remaining candidates available to subsequent tasks.
+
+An active task is existing work, not another delegation request. After interruption, inspect status, verify the previous worker ended, and prefer resuming the same task and worktree. Native work has no automatic expiry. A synchronization failure returns an error and blocks preparation; resolve it before retrying.
+
+After an interrupted completion or lost response, retry the same completion. A prepared result can publish without repeating semantic work. `effects_pending` also calls for `complete` recovery; the semantic result has already landed and needs no new curator.
+
+When a stale base or deliberately abandoned edits require new reconciliation, use:
 
 ```bash
-rightmemory learning --root /absolute/memory-root complete --task TASK
-rightmemory learning --root /absolute/memory-root status --task TASK
+rightmemory curate --root /absolute/memory-root begin --domain memory --retry TASK
 ```
 
-`--output-file FILE` may attach a summary. A saved candidate is evidence, and only completion confirms publication. After interruption, inspect the same task and retry its completion rather than dispatching another agent. Each domain processes shared evidence in bounded update batches; remaining candidates stay ready for subsequent batches, and useful raw evidence remains retrievable afterward.
+After confirming the previous worker has stopped, this can also explicitly take over its claim from another checkout. It preserves the selected evidence and fences the old publication, without carrying over unpublished edits. It is not the recovery action for a merely uncertain completion response.
 
-Requested broader maintenance uses the corresponding domain skill and prepares a task with `--mode maintain --scope "<request>"`. It starts from scoped existing material and does not automatically mark pending candidates processed. Existing inbox, Behavior, and S# material is preserved unless a concrete scoped maintenance task addresses it.
+## Requested Maintenance
 
-## Update a Memory Batch
+`maintain-rightmemory`, `maintain-agent-guidance`, and `maintain-work-skills` use the same preparation and completion flow. A maintenance task starts from scoped existing material:
 
 ```bash
-rightmemory assistant --root /absolute/memory-root update begin
+rightmemory curate --root /absolute/memory-root begin --domain skills --mode maintain --scope "improve the report workflow"
 ```
 
-Delegate only a newly claimed task (`claimed: true`). Give the native Update subagent the returned `instructions_file`, `candidates_file`, and `worktree`. Repeating ordinary `begin` while a task is active returns that task with `claimed: false`. Do not dispatch a second updater while its worker is running. After interruption, confirm that worker stopped and resume the same task and worktree. `status: not_ready` means there is no eligible batch, and `status: sync_required` means sync needs attention first.
-
-Update follows the canonical role, including native edits, complete validation, and commits restricted to allowed files. `validate` remains independently callable:
-
-```bash
-rightmemory validate --root /absolute/candidate-worktree
-```
-
-Complete the task using the returned completion command, preserving its active-root binding:
-
-```bash
-rightmemory assistant --root /absolute/memory-root update complete --task TASK
-rightmemory assistant --root /absolute/memory-root update status --task TASK
-```
-
-`complete` admits the exact validated candidate through the program's protected publication path and records the batch outcome. A commit inside the worktree is not yet an applied update. An unchanged reconciliation still needs completion. `--output-file FILE` can attach the agent's UTF-8 summary to completion. The completion receipt includes `landed_commit`, `changed_paths`, and a `sync` outcome of `published` or `disabled`.
-
-After an interrupted call or lost response, inspect the same task and retry its completion. Keep its identity and worktree. When shared Git sync is enabled, completion first durably prepares the candidate, then publishes through the shared queue's compare-and-swap finalizer. If publication fails, the prepared result remains available; repeating `complete` retries publication without repeating semantic Update. With sync disabled, completion uses the local protected write path.
-
-A stale-base conflict requires reconciliation against current state. To abandon the current task's edits and prepare the same batch again, use:
-
-```bash
-rightmemory assistant --root /absolute/memory-root update begin --retry TASK
-```
-
-The replacement task fences the old task, so its edits cannot later be completed. The program checks for a previously completed or recoverable prepared result before replacing a task. Do not use replacement merely because a completion reply was lost.
+Maintain does not consume pending evidence or ask the agent to edit processing records. The domain core and publication boundary remain the same as Update. Pursuit changes use the separate map workflow.
 
 ## Sync and MCP
 
-Configured ordinary sync refreshes memory before retrieval and pulls before preparing Update. Shared-queue completion publishes through the protected Git finalizer. Explicit ordinary sync operations use the same core:
+Configured sync refreshes sources before retrieval and synchronizes before acquiring a curation claim. Completion validates and publishes through the protected shared claim. Explicit assistant sync controls remain available:
 
 ```bash
 rightmemory assistant --root /absolute/memory-root sync refresh
@@ -109,14 +89,14 @@ rightmemory assistant --root /absolute/memory-root sync pull
 rightmemory assistant --root /absolute/memory-root sync push
 ```
 
-An incoming conflict or invalid merged state returns sync status and available file/operation details, and blocks a new Update. Resolve the reported conflict using the existing sync repair workflow, then retry ordinary sync before preparing another Update. Sync conflicts are not delegated to a native repair agent by this interface.
+An incoming conflict or invalid merged state reports the blocking files or operation. Resolve it through the sync repair workflow before preparing new work. This interface does not automatically delegate a native sync-repair agent.
 
-The optional MCP transport wraps the same assistant core:
+The optional native MCP transport wraps the same controls:
 
 ```bash
 rightmemory assistant --root /absolute/memory-root mcp --transport stdio
 ```
 
-Load the shared assistant skill with this MCP transport; it explains how the assistant's own agents use the deterministic tools. The older `rightmemory mcp` command continues to use its configured internal role backend. See [MCP](MCP.md).
+Keep the shared assistant skill active with this transport. Its curation tools are `rightmemory_submit`, `rightmemory_begin_curation`, `rightmemory_complete_curation`, `rightmemory_curation_status`, and `rightmemory_withdraw_candidate`. Internal MCP adds `rightmemory_run_curation` for configured execution. See [MCP](MCP.md).
 
-Assistant execution covers native retrieval, Memory updates, and learning curation. Internal model-session history, incremental retrieval caching, Insight, and Pruner belong to the separate internal runtime. Requested direct maintenance uses the corresponding domain skill. Use `assistant submit` and its completion receipts for native batches, not the internal `update submit` worker commands.
+Native execution covers retrieval and all three curation domains. Internal model history, incremental retrieval caching, Insight, and Pruner remain capabilities of the configured runtime; native task preparation does not claim those behaviors.

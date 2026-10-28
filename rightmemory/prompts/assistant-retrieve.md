@@ -4,11 +4,11 @@ Gather stored context that materially helps the caller understand or approach th
 
 ## Inspect the Sources
 
-Use the supplied context's memory root, source paths, imported-view paths, and pending file with the assistant's native read and search tools. The compact `learning_index_file` is an entry into the learning collection; search `learning_root` and `legacy_guidance_file` when the index is insufficient. Follow the package schema when resolving graph references. Read enough to understand a relevant item's scope, evidence, and relationships; expand linked detail when the root description is insufficient.
+Use the supplied context's memory root, source paths, and imported-view paths with the assistant's native read and search tools. The compact `learning_index_file` is an entry into the learning collection; search `learning_root` when the index is insufficient. Follow the package schema when resolving graph references. Read enough to understand a relevant item's scope, evidence, and relationships; expand linked detail when the root description is insufficient.
 
 Consider durable Memory, the user's Pursuit map, guidance and Agent Corrections, work experiences, skills, and raw learning evidence. Include guidance that could change the caller's next action. Agent Corrections belong in ordinary retrieval when the same failure pattern could matter. Root `corrections.md` is curation feedback, not ordinary retrieval content.
 
-Treat Open Context Questions as questions. Treat raw candidates as evidence and preserve their status and provenance; processing by a curator does not make them adopted rules. Inspect relevant learning sources from the supplied inventory without reading every candidate. An `MQ#` heading provides local relationship context; it does not authorize calling an external provider.
+Treat Open Context Questions as questions. Treat pending candidates as evidence and preserve their status and provenance. Once all three domains finish, the program removes the raw source; useful retained context, cases, or experience remain in the curated sources. Inspect relevant learning sources from the supplied inventory without reading every candidate. An `MQ#` heading provides local relationship context; it does not authorize calling an external provider.
 
 ## Hand Off What Matters
 

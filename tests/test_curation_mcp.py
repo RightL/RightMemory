@@ -5,7 +5,7 @@ from pathlib import Path
 from mcp import Client
 from mcp.server import MCPServer
 
-from rightmemory.learning_mcp import register_learning_tools
+from rightmemory.curation_mcp import register_curation_tools
 
 
 class Backend:
@@ -19,8 +19,11 @@ class Backend:
             raise self.error
         return {"ok": True, "value": "retained"}
 
-    def submit(self, session_id, evidence, request_id=None):
-        return self._record("submit", session_id, evidence, request_id)
+    def submit(self, session_id, evidence, request_id=None, *, executor="native"):
+        return self._record("submit", session_id, evidence, request_id, executor)
+
+    def withdraw(self, candidate_id):
+        return self._record("withdraw", candidate_id)
 
     def begin(self, domain, *, mode="update", scope="", retry_task=None):
         return self._record("begin", domain, mode, scope, retry_task)
@@ -35,11 +38,11 @@ class Backend:
         return self._record("run", domain, mode, scope)
 
 
-class LearningMcpTests(unittest.TestCase):
+class CurationMcpTests(unittest.TestCase):
     def _server(self, native):
-        server = MCPServer("Learning test", log_level="WARNING")
+        server = MCPServer("Curation test", log_level="WARNING")
         backend = Backend()
-        register_learning_tools(server, Path("/unused-root"), native=native, backend=backend)
+        register_curation_tools(server, Path("/unused-root"), native=native, backend=backend)
         return server, backend
 
     def test_native_registration_has_no_internal_executor_tool(self):
@@ -49,22 +52,24 @@ class LearningMcpTests(unittest.TestCase):
                 return {tool.name for tool in (await client.list_tools()).tools}
 
         common = {
-            "rightmemory_submit_learning", "rightmemory_begin_learning",
-            "rightmemory_complete_learning", "rightmemory_learning_status",
+            "rightmemory_submit", "rightmemory_begin_curation",
+            "rightmemory_complete_curation", "rightmemory_curation_status", "rightmemory_withdraw_candidate",
         }
         self.assertEqual(asyncio.run(names(True)), common)
-        self.assertEqual(asyncio.run(names(False)), common | {"rightmemory_run_learning"})
+        self.assertEqual(asyncio.run(names(False)), common | {"rightmemory_run_curation"})
 
     def test_routes_control_arguments_without_rewriting_evidence(self):
         server, backend = self._server(False)
         cases = [
-            ("rightmemory_submit_learning", {"session_id": "s", "evidence": "  source\n", "request_id": "r"}, ("submit", "s", "  source\n", "r")),
-            ("rightmemory_submit_learning", {"session_id": "s", "evidence": "source"}, ("submit", "s", "source", None)),
-            ("rightmemory_begin_learning", {"domain": "guidance"}, ("begin", "guidance", "update", "", None)),
-            ("rightmemory_begin_learning", {"domain": "skills", "mode": "maintain", "scope": "cases", "retry_task": "old"}, ("begin", "skills", "maintain", "cases", "old")),
-            ("rightmemory_complete_learning", {"task_id": "task", "output": "Done"}, ("complete", "task", "Done")),
-            ("rightmemory_learning_status", {"task_id": "task"}, ("status", "task")),
-            ("rightmemory_run_learning", {"domain": "skills", "mode": "maintain", "scope": "cases"}, ("run", "skills", "maintain", "cases")),
+            ("rightmemory_begin_curation", {"domain": "memory"}, ("begin", "memory", "update", "", None)),
+            ("rightmemory_withdraw_candidate", {"candidate_id": "cid"}, ("withdraw", "cid")),
+            ("rightmemory_submit", {"session_id": "s", "evidence": "  source\n", "request_id": "r"}, ("submit", "s", "  source\n", "r", "configured")),
+            ("rightmemory_submit", {"session_id": "s", "evidence": "source"}, ("submit", "s", "source", None, "configured")),
+            ("rightmemory_begin_curation", {"domain": "guidance"}, ("begin", "guidance", "update", "", None)),
+            ("rightmemory_begin_curation", {"domain": "skills", "mode": "maintain", "scope": "cases", "retry_task": "old"}, ("begin", "skills", "maintain", "cases", "old")),
+            ("rightmemory_complete_curation", {"task_id": "task", "output": "Done"}, ("complete", "task", "Done")),
+            ("rightmemory_curation_status", {"task_id": "task"}, ("status", "task")),
+            ("rightmemory_run_curation", {"domain": "skills", "mode": "maintain", "scope": "cases"}, ("run", "skills", "maintain", "cases")),
         ]
 
         async def exercise():
@@ -84,7 +89,7 @@ class LearningMcpTests(unittest.TestCase):
 
         async def exercise():
             async with Client(server, raise_exceptions=True) as client:
-                result = await client.call_tool("rightmemory_complete_learning", {"task_id": "task"})
+                result = await client.call_tool("rightmemory_complete_curation", {"task_id": "task"})
                 self.assertTrue(result.is_error)
                 self.assertEqual(result.structured_content["error"], {"type": "RuntimeError", "message": "claim replaced"})
 

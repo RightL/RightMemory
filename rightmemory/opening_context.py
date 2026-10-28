@@ -206,7 +206,7 @@ def _resolve_current_block(
             "the Pursuit snapshot source_path must stay inside the RightMemory root"
         ) from exc
     block = manifest.blocks.get((candidate, source_line))
-    if block is None or block.kind not in {"heading", "node"} or block.family != "pursuit":
+    if block is None or block.kind != "heading" or block.family != "pursuit":
         raise OpeningContextError("the Pursuit snapshot no longer identifies a Pursuit graph block")
     if _is_focus(block):
         raise OpeningContextError("Focus is not a selectable Pursuit graph block")

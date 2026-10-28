@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from .guidance import GUIDANCE_INBOX_PATH, parse_guidance_inbox
 from .learning import learning_curated_files, list_learning_candidates
 
 
@@ -86,17 +85,6 @@ def learning_sources(memory_root: Path) -> dict[str, LearningSource]:
         sources[source_id] = LearningSource(
             source_id, path, kind, text, _summary(text), whole_only=kind == "work skill"
         )
-    legacy = root / GUIDANCE_INBOX_PATH
-    if legacy.is_symlink() or (legacy.exists() and not legacy.is_file()):
-        raise ValueError(f"{GUIDANCE_INBOX_PATH} must be a regular file")
-    if legacy.is_file():
-        for entry in parse_guidance_inbox(legacy.read_text(encoding="utf-8")):
-            source_id = f"L#legacy/{entry.entry_id}"
-            sources[source_id] = LearningSource(
-                source_id, legacy, "interaction evidence",
-                _evidence_text(entry.session_id, entry.submitted_at, entry.body),
-                _summary(entry.body), whole_only=True, submitted_at=entry.submitted_at,
-            )
     return dict(sorted(sources.items()))
 
 

@@ -5,11 +5,12 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .automatic_effects import memory_operation_effects, prepare_memory_operation_effects
 from .isolated_write import (
     IsolatedWriteResult,
     IsolatedWriteSupervisor,
@@ -19,8 +20,6 @@ from .isolated_write import (
 from .platform import lock_file, unlock_file
 from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .session import MemoryWriteLock, _ensure_durable_directory, _ensure_runtime_gitignore, _fsync_directory
-from .update_queue import UpdateCandidate, parse_update_candidate_data, update_candidate_data
-from .update_record import UpdateRecord, UpdateRecordStore
 
 
 _OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
@@ -37,12 +36,11 @@ class AssistantWriteTask:
     worktree: Path
     base_commit: str
     branch: str
-    candidates: tuple[UpdateCandidate, ...]
     operation_id: str
+    input_data: dict
     source_commit: str | None = None
     output: str | None = None
     external_finalizer: str | None = None
-    input_data: dict | None = None
 
 
 class AssistantWriteManager:
@@ -53,54 +51,24 @@ class AssistantWriteManager:
             raise ValueError(f"unsupported prepared write role: {role}")
         self.memory_root = Path(memory_root).resolve()
         self.role = role
-        self.state_root = self.memory_root / ".runtime" / "assistant-write"
-        if role != "update":
-            self.state_root /= role
+        self.state_root = self.memory_root / ".runtime" / "assistant-write" / role
         self.supervisor = IsolatedWriteSupervisor(self.memory_root, role)
 
     def prepare(
-        self,
-        task_id: str,
-        batch_id: str,
-        candidates: Iterable[UpdateCandidate],
-        *,
-        check_current: Callable[[], None] | None = None,
-    ) -> AssistantWriteTask:
-        if self.role != "update":
-            raise ValueError("ordinary candidate batches require the Update writer")
-        evidence = UpdateRecord.from_candidates(candidates)
-        if evidence.operation_id != batch_id:
-            raise ValueError("assistant batch id does not match its candidate evidence")
-        return self._prepare(task_id, batch_id, evidence.candidates, check_current=check_current)
-
-    def prepare_external(
         self,
         task_id: str,
         input_data: dict,
         *,
         check_current: Callable[[], None] | None = None,
     ) -> AssistantWriteTask:
-        """Prepare a curator using the same fenced worktree and publication lifecycle."""
-        if self.role == "update":
-            raise ValueError("Update must retain its ordinary candidate evidence")
+        """Prepare any domain from immutable task identity and candidate proofs."""
         batch_id = _input_digest(input_data)
-        return self._prepare(task_id, batch_id, (), input_data=input_data, check_current=check_current)
-
-    def _prepare(
-        self,
-        task_id: str,
-        batch_id: str,
-        candidates: tuple[UpdateCandidate, ...],
-        *,
-        input_data: dict | None = None,
-        check_current: Callable[[], None] | None = None,
-    ) -> AssistantWriteTask:
         self.supervisor._ensure_repo_root()
         with self._task_locked(task_id):
             task = self._read(task_id)
             if task is not None:
-                if task.batch_id != batch_id or task.candidates != candidates or task.input_data != input_data:
-                    raise ValueError("assistant task already belongs to different candidate evidence")
+                if task.batch_id != batch_id or task.input_data != input_data:
+                    raise ValueError("assistant task already belongs to different frozen input")
                 if check_current is not None:
                     check_current()
                 receipt = SemanticOperationStore(self.memory_root).read(task.operation_id)
@@ -119,7 +87,6 @@ class AssistantWriteManager:
                     task_id,
                     batch_id,
                     self.supervisor._git_stdout(self.memory_root, "rev-parse", "HEAD"),
-                    candidates,
                     input_data=input_data,
                 )
                 self._write(task)
@@ -136,14 +103,14 @@ class AssistantWriteManager:
         self,
         task_id: str,
         *,
+        external_finalizer: str,
         output: str = "",
         check_current: Callable[[], None] | None = None,
-        external_finalizer: str | None = None,
-        prepare_managed_artifacts: Callable[[Path, str, str | None, tuple[str, ...], object], Iterable[str]] | None = None,
     ) -> IsolatedWriteResult:
+        """Freeze and validate semantic edits for the shared claim coordinator."""
         if not isinstance(output, str):
             raise ValueError("assistant output must be a string")
-        finalizer = external_finalizer if external_finalizer is not None else f"assistant:{task_id}"
+        finalizer = external_finalizer
         if not isinstance(finalizer, str) or not finalizer.strip():
             raise ValueError("external_finalizer must be a non-empty string")
         with self._task_locked(task_id):
@@ -173,49 +140,26 @@ class AssistantWriteManager:
                 self.supervisor._validate_candidate(worktree, [])
                 return task.output or ""
 
-            def retain_evidence(worktree: Path, *_args: object) -> tuple[str, ...]:
-                if self.role != "update":
-                    raise ValueError("a curator requires its program-owned finalizer")
-                records = UpdateRecordStore(worktree)
-                if records.root.is_symlink():
-                    raise ValueError("update records must not be a symlink")
-                evidence = UpdateRecord.from_candidates(task.candidates)
-                existing = records.read(task.batch_id)
-                if existing is not None:
-                    if existing != evidence:
-                        raise ValueError("assistant batch already has different retained evidence")
-                    return ()
-                path = records.write(evidence)
-                return (path.relative_to(worktree).as_posix(),)
-
             try:
-                if self.role != "update" and prepare_managed_artifacts is None:
-                    raise ValueError("a curator requires its program-owned finalizer")
-                result = self.supervisor.run(
+                return self.supervisor.run(
                     import_commits,
                     operation_id=task.operation_id,
                     operation_input={
-                        "kind": "assistant-update",
-                        "task_id": task.task_id,
-                        "batch_id": task.batch_id,
-                        "base_commit": task.base_commit,
-                        "candidates": [update_candidate_data(item) for item in task.candidates],
-                    } if self.role == "update" else {
-                        "kind": "assistant-curation", "role": self.role,
+                        "kind": "curation", "role": self.role,
                         "task_id": task.task_id, "batch_id": task.batch_id,
                         "base_commit": task.base_commit, "input": task.input_data,
                     },
-                    prepare_managed_artifacts=prepare_managed_artifacts or retain_evidence,
+                    effects_for_outcome=(
+                        lambda paths, commits: memory_operation_effects(self.memory_root, paths, commits)
+                    ) if self.role == "update" else None,
+                    prepare_effects=(
+                        lambda operation_id, worktree: prepare_memory_operation_effects(
+                            self.memory_root, operation_id, worktree,
+                        )
+                    ) if self.role == "update" else None,
                     external_finalizer=finalizer,
                     check_current=check_current,
                 )
-                if external_finalizer is None:
-                    result = self.supervisor.publish_external(
-                        task.operation_id,
-                        external_finalizer=finalizer,
-                        check_current=check_current,
-                    )
-                return result
             except Exception as exc:
                 receipt = SemanticOperationStore(self.memory_root).read(task.operation_id)
                 if receipt is None or receipt.phase == "running":
@@ -274,9 +218,6 @@ class AssistantWriteManager:
             ).split()
             if parents != [commit, parent]:
                 raise RuntimeError("assistant worktree must have linear commits from its prepared base")
-            if self.role != "update" and (task.input_data or {}).get("mode") != "maintain":
-                if any(path.startswith("learning/candidates/") for path in self.supervisor._commit_paths(self.memory_root, commit)):
-                    raise RuntimeError("raw learning evidence can be retired only during maintenance")
             self.supervisor._validate_commits(self.memory_root, [commit])
             parent = commit
         return commits
@@ -317,14 +258,14 @@ class AssistantWriteManager:
             raise RuntimeError("assistant worktree identity does not match its prepared task")
 
     def _task(
-        self, task_id: str, batch_id: str, base_commit: str, candidates: tuple[UpdateCandidate, ...],
+        self, task_id: str, batch_id: str, base_commit: str,
         *, source_commit: str | None = None, output: str | None = None,
         external_finalizer: str | None = None,
-        input_data: dict | None = None,
+        input_data: dict,
     ) -> AssistantWriteTask:
         digest = _task_digest(task_id)
         return AssistantWriteTask(
-            task_id=task_id, batch_id=batch_id, base_commit=base_commit, candidates=candidates,
+            task_id=task_id, batch_id=batch_id, base_commit=base_commit,
             worktree=self.memory_root / ".runtime" / "worktrees" / f"assistant-{digest}",
             branch=f"rightmemory-assistant-{digest}", operation_id=f"assistant-{self.role}-{digest}",
             source_commit=source_commit, output=output, external_finalizer=external_finalizer,
@@ -342,20 +283,12 @@ class AssistantWriteManager:
         if not path.is_file():
             raise ValueError("assistant task record must be a regular file")
         data = json.loads(path.read_text(encoding="utf-8"))
-        keys = {"version", "task_id", "batch_id", "base_commit", "candidates", "source_commit", "output", "external_finalizer"}
-        if self.role != "update":
-            keys.add("input")
+        keys = {"version", "task_id", "batch_id", "base_commit", "input", "source_commit", "output", "external_finalizer"}
         if not isinstance(data, dict) or set(data) != keys or type(data["version"]) is not int or data["version"] != 1:
             raise ValueError("invalid assistant task record")
         if data["task_id"] != task_id or not isinstance(data["base_commit"], str) or not _OID.fullmatch(data["base_commit"]):
             raise ValueError("invalid assistant task identity or base commit")
-        if not isinstance(data["candidates"], list):
-            raise ValueError("assistant task candidates must be a list")
-        candidates = tuple(parse_update_candidate_data(item) for item in data["candidates"])
-        if self.role == "update":
-            if UpdateRecord.from_candidates(candidates).operation_id != data["batch_id"]:
-                raise ValueError("assistant task batch does not match its candidate evidence")
-        elif candidates or _input_digest(data["input"]) != data["batch_id"]:
+        if _input_digest(data["input"]) != data["batch_id"]:
             raise ValueError("assistant task batch does not match its frozen input")
         source = data["source_commit"]
         if source is None:
@@ -368,9 +301,9 @@ class AssistantWriteManager:
         ):
             raise ValueError("invalid assistant task completion")
         return self._task(
-            task_id, data["batch_id"], data["base_commit"], candidates,
+            task_id, data["batch_id"], data["base_commit"],
             source_commit=source, output=data["output"], external_finalizer=data["external_finalizer"],
-            input_data=data.get("input"),
+            input_data=data["input"],
         )
 
     def _write(self, task: AssistantWriteTask) -> None:
@@ -379,12 +312,10 @@ class AssistantWriteManager:
         data = {
             "version": 1, "task_id": task.task_id, "batch_id": task.batch_id,
             "base_commit": task.base_commit,
-            "candidates": [update_candidate_data(item) for item in task.candidates],
+            "input": task.input_data,
             "source_commit": task.source_commit, "output": task.output,
             "external_finalizer": task.external_finalizer,
         }
-        if self.role != "update":
-            data["input"] = task.input_data
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
             with temporary.open("x", encoding="utf-8") as handle:

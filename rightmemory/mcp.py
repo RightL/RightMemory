@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import time
-import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -14,14 +13,11 @@ from mcp.server import MCPServer
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 
-from .async_update import AsyncUpdateStore
 from .config import load_config
 from .codex_sdk import CodexSdkRunner
 from .debug import DebugTrace
-from .learning_mcp import register_learning_tools
+from .curation_mcp import CurationBackend, register_curation_tools
 from .runtime import RightMemoryRuntime
-from .update_alerts import collect_update_recovery_summary
-from .update_queue import UpdateQueueStore
 
 
 SESSION_ID_DESCRIPTION = (
@@ -32,11 +28,6 @@ RETRIEVE_NEED_DESCRIPTION = (
     "A concise description of the cross-session context needed for the current work, "
     "not a verbatim copy of the user's message."
 )
-UPDATE_EVIDENCE_DESCRIPTION = (
-    "A self-contained account of concrete evidence, the context and uncertainty "
-    "needed to interpret it, and its possible value in future work."
-)
-
 RETRIEVE_DESCRIPTION = """\
 Retrieve cross-session context when it could materially change how the current work is
 understood or approached. Ask for the context needed rather than forwarding the user's
@@ -46,47 +37,20 @@ Use relevant returned context in the work, but treat the current conversation an
 evidence as authoritative. Skip clearly self-contained requests for which stored context
 is unlikely to matter.
 
-Act on returned learning-ready notices with rightmemory_run_learning, preserving the
-notice's domain, mode, and scope. Continue the user's work while curation runs when
-background execution is available; inspect an active task before starting another.
+Candidate submission starts the configured curation worker. Inspect returned curation
+notices when recovery is needed; continue the user's work while it runs.
 
 If returned context is stale, wrong, misleading, or overbroad, do not follow it; submit
-the correction and current evidence through the relevant path: rightmemory_submit_update
-for ordinary Memory, or rightmemory_submit_learning for behavioral guidance and reusable work."""
-
-SUBMIT_UPDATE_DESCRIPTION = """\
-Submit concrete ordinary context that could improve future understanding, decisions,
-collaboration, or repeated work. Preserve the circumstances, supporting evidence, and
-unresolved uncertainty that affect its meaning. A useful candidate need not already
-support a stable conclusion; Update uses the Memory domain core to decide what becomes
-durable Memory. Behavioral guidance, corrections about how the agent works, and reusable
-work experience go through rightmemory_submit_learning.
-
-Pursuit is read-only to Update. Explicit map edits belong in the human editor or the
-maintain-pursuit-map workflow, not in an Update submission.
-
-Submit at a natural boundary once the evidence is concrete enough to describe; completion
-is not required. Leave out routine progress and copies of project artifacts that add no
-independent future value. Combine related evidence due at the same boundary.
-
-State what happened, what is true now, and why it may matter. Do not prescribe stored
-wording, identifiers, classification, placement, or edits.
-
-Processing is asynchronous. After an empty successful result, continue the task without
-waiting, polling, or resubmitting. Only actionable failures or recovery warnings are
-returned."""
+the correction and current evidence through rightmemory_submit."""
 
 SessionId = Annotated[str, Field(description=SESSION_ID_DESCRIPTION, min_length=1)]
 RetrieveNeed = Annotated[str, Field(description=RETRIEVE_NEED_DESCRIPTION, min_length=1)]
-UpdateEvidence = Annotated[str, Field(description=UPDATE_EVIDENCE_DESCRIPTION, min_length=1)]
 
 _MAX_ERROR_DETAIL_CHARS = 400
 
 
 class McpBackend(Protocol):
     def retrieve(self, session_id: str, need: str) -> str: ...
-
-    def submit_update(self, session_id: str, evidence: str) -> str | None: ...
 
     def actionable_warning(self) -> str | None: ...
 
@@ -136,44 +100,8 @@ class DefaultMcpBackend:
                 if timing is not None:
                     timing.runtime_cleanup_ms = _elapsed_ms(cleanup_started)
 
-    def submit_update(self, session_id: str, evidence: str) -> str | None:
-        store = AsyncUpdateStore(self.memory_root, "update")
-        candidate_uid = uuid.uuid4().hex
-        try:
-            store.submit(
-                session_id,
-                evidence,
-                candidate_uid=candidate_uid,
-            )
-        except Exception as exc:
-            if not self._candidate_was_saved(store, session_id, candidate_uid):
-                raise
-            return (
-                "RightMemory saved the update evidence, but could not start or wake its "
-                f"update worker: {_error_detail(exc)}. Tell the user to run "
-                "`rightmemory status`; do not resubmit the evidence."
-            )
-        return None
-
-    def _candidate_was_saved(
-        self,
-        store: AsyncUpdateStore,
-        session_id: str,
-        candidate_uid: str,
-    ) -> bool:
-        try:
-            state = store.read(session_id)
-        except Exception:
-            state = None
-        if state is not None and candidate_uid in state.accepted_candidate_uids:
-            return True
-        try:
-            return UpdateQueueStore(self.memory_root).read_outbox(candidate_uid) is not None
-        except Exception:
-            return False
-
     def actionable_warning(self) -> str | None:
-        return _actionable_update_warning(self.memory_root)
+        return _actionable_curation_warning(self.memory_root)
 
     def close(self) -> None:
         self.codex_runner.close()
@@ -213,6 +141,7 @@ def create_mcp_server(
     memory_root: Path,
     *,
     backend: McpBackend | None = None,
+    curation_backend: CurationBackend | None = None,
 ) -> MCPServer:
     if backend is None:
         selected_backend = DefaultMcpBackend(
@@ -255,23 +184,7 @@ def create_mcp_server(
         output = selected_backend.retrieve(clean_session, clean_need)
         return _result(output, selected_backend.actionable_warning())
 
-    @server.tool(
-        name="rightmemory_submit_update",
-        description=SUBMIT_UPDATE_DESCRIPTION,
-        structured_output=False,
-    )
-    def rightmemory_submit_update(
-        session_id: SessionId,
-        evidence: UpdateEvidence,
-    ) -> CallToolResult:
-        clean_session = _clean_session_id(session_id)
-        clean_evidence = _clean_text(evidence, "update evidence")
-        warning = selected_backend.submit_update(clean_session, clean_evidence)
-        if warning is None:
-            warning = selected_backend.actionable_warning()
-        return _result(warning)
-
-    register_learning_tools(server, memory_root, native=False)
+    register_curation_tools(server, memory_root, native=False, backend=curation_backend)
 
     return server
 
@@ -290,25 +203,26 @@ def mcp_main(memory_root: Path, argv: list[str] | None = None) -> int:
     return 0
 
 
-def _actionable_update_warning(memory_root: Path) -> str | None:
+def _actionable_curation_warning(memory_root: Path) -> str | None:
+    from .curation_worker import CurationWorker
     try:
-        return collect_update_recovery_summary(Path(memory_root)).warning()
-    except Exception as exc:
-        return (
-            "RightMemory could not inspect update recovery state: "
-            f"{_error_detail(exc)}. Tell the user to run `rightmemory status`."
-        )
+        state = CurationWorker(memory_root).status()
+        if state.get("error"):
+            return f"RightMemory curation needs recovery: {state['error']}. Inspect `rightmemory curate status`."
+    except (OSError, ValueError, RuntimeError) as exc:
+        return f"RightMemory could not inspect curation state: {_error_detail(exc)}"
+    return None
 
 
-def _learning_notice(memory_root: Path) -> str | None:
+def _curation_notice(memory_root: Path) -> str | None:
     from .learning_service import LearningService
 
     try:
         notices = LearningService(memory_root).notices()
     except (OSError, ValueError, RuntimeError) as exc:
-        return f"RightMemory could not inspect learning readiness: {_error_detail(exc)}"
+        return f"RightMemory could not inspect curation readiness: {_error_detail(exc)}"
     if any(item["status"] != "waiting" for item in notices):
-        return json.dumps({"learning": notices}, ensure_ascii=False)
+        return json.dumps({"curation": notices}, ensure_ascii=False)
     return None
 
 
@@ -334,7 +248,7 @@ def _timed_default_retrieve_result(
 
         result_started = time.perf_counter()
         try:
-            result = _result(output, warning, _learning_notice(backend.memory_root))
+            result = _result(output, warning, _curation_notice(backend.memory_root))
         finally:
             timing.result_construction_ms = _elapsed_ms(result_started)
         outcome = "success"

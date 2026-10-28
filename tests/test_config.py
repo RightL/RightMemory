@@ -14,7 +14,6 @@ from rightmemory.config import (
     AgentCliConfig,
     PrunerConfig,
     RuntimeConfig,
-    load_async_update_config,
     load_config,
     load_insight_watch_config,
     load_pruner_config,
@@ -25,7 +24,6 @@ from rightmemory.reference import REFERENCE_FILES
 from rightmemory.provider_sessions import ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
 from rightmemory.prune import PruneDueStatus
-from rightmemory.recent_submitted import RecentSubmittedMemoryEntry
 from rightmemory.runtime import (
     SYNC_REPAIR_SESSION_ID,
     RightMemoryRuntime,
@@ -37,11 +35,9 @@ from rightmemory.semantic_operation import OperationEffect, SemanticOperationSto
 from rightmemory.retrieve_selection import RetrieveSelection
 from rightmemory.shared_view_files import FileViewPublishResult
 from rightmemory.sync import SyncResult
-from rightmemory.update_queue import UpdateCandidate
-from rightmemory.update_record import UpdateRecord, UpdateRecordStore
 
 
-EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": [], "recent_candidates": []}'
+EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": []}'
 
 class ConfigTests(unittest.TestCase):
     def test_retired_subsystem_config_is_rejected_without_rewriting(self):
@@ -498,101 +494,6 @@ class ConfigTests(unittest.TestCase):
 
         self.assertIn("unsupported [debug] config key(s): format", str(caught.exception))
 
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_async_update_config_defaults(self):
-        config_path = self._write_config("")
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            config = load_async_update_config()
-
-        self.assertEqual(config.memory_root, Path("/home/example/.rightmemory"))
-        self.assertEqual(config.trigger_candidates, 15)
-        self.assertEqual(config.target_batch_candidates, 30)
-        self.assertEqual(config.max_wait_seconds, 24 * 60 * 60)
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_async_update_config_parses_custom_values(self):
-        config_path = self._write_config(
-            """
-            [update.model]
-            model_id = "openai/update"
-
-            [update.async]
-            trigger_candidates = 18
-            target_batch_candidates = 22
-            max_wait_seconds = 7200
-            """
-        )
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            async_config = load_async_update_config()
-            runtime_config = load_config("update")
-
-        self.assertEqual(async_config.trigger_candidates, 18)
-        self.assertEqual(async_config.target_batch_candidates, 22)
-        self.assertEqual(async_config.max_wait_seconds, 7200)
-        self.assertEqual(runtime_config.model_id, "openai/update")
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_async_update_config_rejects_invalid_values(self):
-        cases = [
-            ("trigger_candidates = 0", "[update.async].trigger_candidates must be a positive integer"),
-            ("trigger_candidates = true", "[update.async].trigger_candidates must be a positive integer"),
-            ("target_batch_candidates = 0", "[update.async].target_batch_candidates must be a positive integer"),
-            ("target_batch_candidates = true", "[update.async].target_batch_candidates must be a positive integer"),
-            ("max_wait_seconds = -1", "[update.async].max_wait_seconds must be a positive integer"),
-            ("max_wait_seconds = true", "[update.async].max_wait_seconds must be a positive integer"),
-        ]
-        for body, message in cases:
-            with self.subTest(body=body):
-                config_path = self._write_config(
-                    f"""
-                    [update.async]
-                    {body}
-                    """
-                )
-
-                with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-                    with self.assertRaises(ValueError) as caught:
-                        load_async_update_config()
-
-                self.assertIn(message, str(caught.exception))
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_async_update_config_rejects_target_below_trigger(self):
-        config_path = self._write_config(
-            """
-            [update.async]
-            trigger_candidates = 15
-            target_batch_candidates = 14
-            """
-        )
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch(
-            "pathlib.Path.exists",
-            return_value=True,
-        ):
-            with self.assertRaisesRegex(
-                ValueError,
-                "target_batch_candidates must be greater than or equal to",
-            ):
-                load_async_update_config()
-
-    @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
-    def test_async_update_config_rejects_unknown_key(self):
-        config_path = self._write_config(
-            """
-            [update.async]
-            target_batch_candidates = 15
-            extra = 1
-            """
-        )
-
-        with patch("rightmemory.config.CONFIG_PATH", config_path), patch("pathlib.Path.exists", return_value=True):
-            with self.assertRaises(ValueError) as caught:
-                load_async_update_config()
-
-        self.assertIn("unsupported [update.async] config key(s): extra", str(caught.exception))
 
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_insight_watch_config_defaults(self):
@@ -1396,7 +1297,7 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
         state = type("State", (), {})()
 
-        with patch("rightmemory.runtime.record_memory_change_pressure_once") as pressure:
+        with patch("rightmemory.automatic_effects.record_memory_change_pressure_once") as pressure:
             runtime._run_operation_effects("update-op-1", state)
             runtime._run_operation_effects("update-op-1", state)
 
@@ -1647,7 +1548,7 @@ class RuntimeTests(unittest.TestCase):
             runtime = RightMemoryRuntime(config)
         state = type("State", (), {})()
 
-        with patch.object(runtime, "_publish_file_views_after_write", side_effect=OSError("hub offline")):
+        with patch("rightmemory.automatic_effects.publish_file_view_outbox", side_effect=OSError("hub offline")):
             runtime._run_operation_effects("prune-op-1", state)
 
         record = store.read("prune-op-1")
@@ -1672,12 +1573,35 @@ class RuntimeTests(unittest.TestCase):
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
 
-        with patch.object(runtime, "_publish_file_views_after_write") as publish:
+        with patch("rightmemory.automatic_effects.publish_file_view_outbox", return_value=[]) as publish:
             runtime._run_operation_effects("publish-new", type("State", (), {})())
             runtime._run_operation_effects("publish-old", type("State", (), {})())
 
-        publish.assert_called_once_with(raise_on_failure=True, operation_id="publish-new")
+        publish.assert_called_once_with(
+            store.effect_state_root("publish-new", "file-view-publish"),
+            operation_id="publish-new", credential_root=root,
+        )
         self.assertEqual(store.list_pending_effects("publish-old"), ())
+
+    def test_prepared_memory_worktree_never_publishes_file_views(self):
+        root = Path(self.tempdir.name)
+        worktree = root / "prepared"
+        worktree.mkdir()
+        config = RuntimeConfig(
+            role="update", model_id="openai/test", memory_root=worktree, state_root=root,
+        )
+        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+            runtime = RightMemoryRuntime(config)
+        with (
+            patch("rightmemory.runtime.publish_approved_file_views") as direct,
+            patch("rightmemory.runtime.publish_file_view_outbox") as outbox,
+            patch("rightmemory.runtime.record_file_view_publish_results") as record,
+        ):
+            runtime._publish_file_views_after_write()
+            runtime._publish_file_views_after_write(operation_id="unpublished")
+        direct.assert_not_called()
+        outbox.assert_not_called()
+        record.assert_not_called()
 
     def test_publish_effect_reads_the_durable_operation_outbox(self):
         root = Path(self.tempdir.name)
@@ -1708,96 +1632,6 @@ class RuntimeTests(unittest.TestCase):
             credential_root=root,
         )
 
-    def test_isolated_update_prepares_managed_artifacts_before_state_promotion(self):
-        main_root = Path(self.tempdir.name)
-        worktree = main_root / ".runtime" / "worktrees" / "update-123"
-        events = []
-
-        class FakeSupervisor:
-            def __init__(self, memory_root, role):
-                pass
-
-            def run(self, callback, **kwargs):
-                output = callback(worktree)
-                kwargs["prepare_managed_artifacts"](
-                    worktree,
-                    "base123",
-                    "tip456",
-                    ("MEMORY.md",),
-                    output,
-                )
-                events.append("landed")
-                return IsolatedWriteResult(
-                    output=output,
-                    commits_landed=1,
-                    start_commit="base123",
-                    landed_commit="tip456",
-                    changed_paths=("MEMORY.md",),
-                )
-
-        class FakeState:
-            def __init__(self, *args, **kwargs):
-                self.root = main_root / ".runtime" / "fake-state"
-
-            def __enter__(self):
-                return self.root
-
-            def __exit__(self, exc_type, exc, traceback):
-                return None
-
-            def promote(self):
-                events.append("promote")
-
-            def archive_failed_provider_session(self):
-                events.append("archive")
-
-        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=main_root)
-        with (
-            patch.dict("sys.modules", self._fake_pydantic_modules()),
-            patch("rightmemory.runtime.IsolatedWriteSupervisor", FakeSupervisor),
-            patch("rightmemory.runtime._IsolatedStateOverlay", FakeState),
-            patch.object(RightMemoryRuntime, "_run_session_turn_in_worktree", return_value="updated"),
-        ):
-            runtime = RightMemoryRuntime(config)
-            with patch.object(
-                runtime,
-                "_prepare_update_artifacts",
-                side_effect=lambda *_args: events.append("artifacts") or (),
-            ):
-                result = runtime._run_session_turn_isolated("agent-session", "remember one")
-
-        self.assertEqual(result, "updated")
-        self.assertEqual(events, ["artifacts", "landed", "promote"])
-
-    def test_candidate_record_is_prepared_for_queued_update(self):
-        root = Path(self.tempdir.name)
-        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=root)
-        candidate = UpdateCandidate(
-            uid="a" * 32,
-            session_id="agent-session",
-            display_id=1,
-            message="exact candidate",
-            submitted_at="2026-07-27T12:00:00+00:00",
-        )
-        record = UpdateRecord.from_candidates((candidate,))
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-
-        paths = runtime._prepare_update_artifacts(
-            record.operation_id,
-            record,
-            root,
-            "base123",
-            "tip456",
-            ("MEMORY.md",),
-            "updated summary",
-        )
-
-        self.assertEqual(
-            paths,
-            (f"update_records/{record.operation_id}.json",),
-        )
-        self.assertEqual(UpdateRecordStore(root).read(record.operation_id), record)
 
     def test_isolated_run_holds_main_session_lock_around_supervisor_execution(self):
         main_root = Path(self.tempdir.name)
@@ -2252,71 +2086,6 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Original detail.", first)
         self.assertIn("Revised detail.", second)
 
-    def test_retrieve_turn_records_candidate_visibility_and_delivery_after_success(self):
-        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
-        self._write_async_update_state(
-            "update-a",
-            pending=[
-                {
-                    "id": 1,
-                    "message": "remember successful delivery",
-                    "submitted_at": "2026-05-19T00:00:00+00:00",
-                }
-            ],
-        )
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            runtime.agent.output_values = iter(
-                [RetrieveSelection(recent_candidates=["update-a:1"])]
-            )
-            runtime.run_session_turn("agent-session", "find one")
-
-        state = runtime.retrieve_context.load("agent-session")
-        self.assertEqual(
-            state.visible_recent_candidates,
-            {f"{1:032x}": "update-a:1"},
-        )
-        self.assertIn("update-a:1", state.delivery_coverage.recent_candidates)
-        separate_state = (
-            Path(self.tempdir.name)
-            / ".runtime"
-            / "recent_submitted"
-            / "retrieve"
-            / "agent-session.json"
-        )
-        self.assertFalse(separate_state.exists())
-
-    def test_retrieve_turn_does_not_advance_candidate_state_after_failure(self):
-        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
-        self._write_async_update_state(
-            "update-a",
-            pending=[
-                {
-                    "id": 1,
-                    "message": "remember failed delivery retry",
-                    "submitted_at": "2026-05-19T00:00:00+00:00",
-                }
-            ],
-        )
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-
-            def run_sync(message, message_history=None, model_settings=None, usage_limits=None):
-                raise RuntimeError("model failed")
-
-            runtime.agent.run_sync = run_sync
-            with self.assertRaises(RuntimeError):
-                runtime.run_session_turn("agent-session", "find one")
-
-        state_path = (
-            Path(self.tempdir.name)
-            / ".runtime"
-            / "retrieve_context"
-            / "sessions"
-            / "agent-session.json"
-        )
-        self.assertFalse(state_path.exists())
 
     def test_cli_agent_new_retrieve_starts_fresh_local_context(self):
         root = Path(self.tempdir.name)
@@ -2326,7 +2095,6 @@ class RuntimeTests(unittest.TestCase):
             agent_cli=AgentCliConfig(provider="codex"),
             memory_root=root,
         )
-        old_entry = RecentSubmittedMemoryEntry("update-old", 1, "2026-07-16T00:00:00+00:00", "old candidate")
 
         with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
             executor_class.return_value.has_saved_session.return_value = False
@@ -2336,14 +2104,12 @@ class RuntimeTests(unittest.TestCase):
                 "agent-session",
                 memory_commit="old-commit",
                 model_history_json=None,
-                visible_recent_candidates={old_entry.key: "update-old:1"},
             )
             result = runtime.run_session_turn("agent-session", "fresh question")
 
         self.assertEqual(result, "no strong match")
         state = runtime.retrieve_context.load("agent-session")
         self.assertNotEqual(state.delivered_memory_commit, "old-commit")
-        self.assertEqual(state.visible_recent_candidates, {})
     def test_write_role_creates_memory_lock_without_synthesizing_root_gitignore(self):
         config = RuntimeConfig(
             role="update",
@@ -2359,14 +2125,6 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
         self.assertFalse((Path(self.tempdir.name) / ".gitignore").exists())
 
-    def test_retrieve_role_does_not_record_recent_submitted_state_without_entries(self):
-        config = RuntimeConfig(role="retrieve", model_id="openai/test", memory_root=Path(self.tempdir.name))
-
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            runtime.run_session_turn("agent-session", "find one")
-
-        self.assertFalse((Path(self.tempdir.name) / ".runtime" / "recent_submitted").exists())
 
     def test_update_turn_runs_sync_pull_without_exposing_context(self):
         config = RuntimeConfig(
@@ -2746,35 +2504,6 @@ class RuntimeTests(unittest.TestCase):
 
         schedule.assert_called_once_with(memory_root)
 
-    def test_retrieve_sync_wakes_update_worker_after_incoming_queue_lands(self):
-        memory_root = Path(self.tempdir.name)
-        config = RuntimeConfig(
-            role="retrieve",
-            model_id="openai/test",
-            memory_root=memory_root,
-            sync=load_sync_config_for_test(memory_root, enabled=True),
-        )
-
-        with (
-            patch.dict("sys.modules", self._fake_pydantic_modules()),
-            patch("rightmemory.runtime.SyncManager") as manager_class,
-            patch("rightmemory.runtime.UpdateQueueStore") as queue_class,
-            patch("rightmemory.runtime.AsyncUpdateStore") as update_class,
-            patch("rightmemory.runtime.schedule_deferred_sync"),
-        ):
-            manager_class.return_value.refresh_for_retrieve.return_value = SyncResult(
-                "ahead",
-                "incoming memory landed with local commits pending push",
-            )
-            queue_class.return_value.snapshot.return_value = types.SimpleNamespace(
-                candidates=[object()]
-            )
-            queue_class.return_value.outbox_candidates.return_value = []
-            runtime = RightMemoryRuntime(config)
-            runtime.run_session_turn("agent-session", "find one")
-
-        update_class.assert_called_once_with(memory_root, "update")
-        update_class.return_value.wake_worker.assert_called_once_with()
 
     def test_historian_turn_does_not_run_sync_pull(self):
         config = RuntimeConfig(
@@ -3389,36 +3118,6 @@ class RuntimeTests(unittest.TestCase):
                 raise RuntimeError("model failed")
 
         return FailingAgent
-
-    def _write_async_update_state(self, session_id, *, pending=None, current_batch=None):
-        def with_candidate_uids(jobs):
-            return [
-                {**job, "candidate_uid": job.get("candidate_uid", f"{job['id']:032x}")}
-                for job in (jobs or [])
-            ]
-
-        state_path = Path(self.tempdir.name) / ".runtime" / "async" / "update" / f"{session_id}.json"
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(
-            json.dumps(
-                {
-                    "status": "running",
-                    "session_id": session_id,
-                    "role": "update",
-                    "phase": "waiting",
-                    "started_at": "2026-05-19T00:00:00+00:00",
-                    "finished_at": None,
-                    "pid": None,
-                    "result": None,
-                    "error": None,
-                    "next_flush_at": "2026-05-19T01:00:00+00:00",
-                    "current_batch": with_candidate_uids(current_batch),
-                    "pending": with_candidate_uids(pending),
-                    "next_id": 10,
-                }
-            ),
-            encoding="utf-8",
-        )
 
 
 class PackageReferenceTests(unittest.TestCase):

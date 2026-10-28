@@ -37,20 +37,16 @@ ANCHOR_CANDIDATE_RE = re.compile(
 UNSUPPORTED_ANCHOR_RE = re.compile(r"^(#{1,})\s+.*?\{([A-Za-z]+#)([^}]*)\}")
 NODE_RE = re.compile(r"^\s*-\s+`([^`]+)`.*?(?:\s(?:\u2192|->)\s*\[(.*?)\])\s*$")
 NODE_CANDIDATE_RE = re.compile(r"^\s*-\s+`([^`]+)`(?:\s|$)")
-# Reading compatibility for existing user data, not the current Pursuit schema.
-LEGACY_PURSUIT_FIELD_RE = re.compile(r"^\s*\*\*(State|Next|Done when|Status):\*\*", re.IGNORECASE)
 EDGE_RE = re.compile(rf"^\s*([A-Za-z][A-Za-z0-9_-]*):\s*({ITEM_ID_PATTERN})\s*$")
 FOCUS_HEADING_RE = re.compile(r"^##\s+Focus\s*$", re.IGNORECASE)
-FOCUS_REFERENCE_RE = re.compile(rf"^\s*-\s+`({ITEM_ID_PATTERN})`(?:\s|$)")
+FOCUS_REFERENCE_RE = re.compile(rf"^\s*-\s+`({ITEM_ID_PATTERN})`\s*$")
 FOCUS_CANDIDATE_RE = re.compile(r"^\s*-\s+`([^`]+)`(?:\s|$)")
 HEADING_RE = re.compile(r"^(#+)\s+")
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 MEMORY_DETAIL_FILE_RE = re.compile(rf"^MEMORY_{ITEM_ID_PATTERN}\.md$")
 MEMORY_SKILL_FILE_RE = re.compile(rf"^MEMORY_SKILL_{ITEM_ID_PATTERN}\.md$")
-PURSUIT_DETAIL_FILE_RE = re.compile(
-    rf"^PURSUIT_(?!(?i:RULES)\.md$){ITEM_ID_PATTERN}\.md$"
-)
+PURSUIT_DETAIL_FILE_RE = re.compile(rf"^PURSUIT_{ITEM_ID_PATTERN}\.md$")
 
 ROOT_FILES = (("MEMORY.md", "memory"), ("PURSUITS.md", "pursuit"))
 MEMORY_ONLY_ANCHOR_KINDS = {"M#", "S#", "MF#", "MQ#"}
@@ -490,7 +486,6 @@ def _parse_document(
 ) -> list[tuple[BlockKey, BackingReference]]:
     stack: list[BlockKey] = []
     in_focus = False
-    in_pursuit_next = False
     fence_char: str | None = None
     fence_length = 0
     f_references: list[tuple[BlockKey, BackingReference]] = []
@@ -631,9 +626,6 @@ def _parse_document(
 
             if document.family == "pursuit" and depth <= 2:
                 in_focus = bool(profile.allow_focus and FOCUS_HEADING_RE.match(line))
-            if document.family == "pursuit":
-                in_pursuit_next = False
-
             if item_id is not None:
                 edges, malformed = _parse_edges(edge_text)
                 item = GraphItem(
@@ -666,32 +658,17 @@ def _parse_document(
                         document.path,
                         line_number,
                     )
-                if anchor_kind == "F#" and document.family == "pursuit" and item_id.casefold() == "rules":
-                    _add_error(
-                        manifest,
-                        f"Pursuit F# id `{item_id}` remains reserved for the legacy root reference path at "
-                        f"{_loc(manifest.root, item)}",
-                        document.path,
-                        line_number,
-                    )
-                else:
-                    reference = _backing_reference(manifest.root, item)
-                    if reference is not None:
-                        _record_backing(manifest, reference, item)
-                        if reference.kind == "F#":
-                            f_references.append((key, reference))
+                reference = _backing_reference(manifest.root, item)
+                if reference is not None:
+                    _record_backing(manifest, reference, item)
+                    if reference.kind == "F#":
+                        f_references.append((key, reference))
 
             stack.append(key)
             continue
 
         parent_key = stack[-1] if stack else document.root_key
         parent = manifest.blocks[parent_key]
-        if document.family == "pursuit":
-            field_match = LEGACY_PURSUIT_FIELD_RE.match(line)
-            if field_match:
-                in_pursuit_next = field_match.group(1).casefold() == "next"
-                _append_text(parent, line, line_number)
-                continue
         if in_focus:
             focus_candidate = FOCUS_CANDIDATE_RE.match(line)
             if focus_candidate is not None:
@@ -700,6 +677,16 @@ def _parse_document(
                     _add_error(
                         manifest,
                         f"invalid Focus reference id `{focus_id}` at {document.relative_path}:{line_number}",
+                        document.path,
+                        line_number,
+                    )
+                    _append_text(parent, line, line_number)
+                    continue
+                if FOCUS_REFERENCE_RE.fullmatch(line) is None:
+                    _add_error(
+                        manifest,
+                        f"Focus reference `{focus_id}` must contain only a backticked Pursuit heading id at "
+                        f"{document.relative_path}:{line_number}",
                         document.path,
                         line_number,
                     )
@@ -724,14 +711,20 @@ def _parse_document(
                 manifest.focus_blocks.append(key)
                 continue
 
-        if document.family == "pursuit" and in_pursuit_next:
-            # Older roots used Next lists. Retain every line as unstructured body
-            # until another legacy field or heading, including unknown actions.
-            _append_text(parent, line, line_number)
-            continue
-
         node_candidate = NODE_CANDIDATE_RE.match(line)
         if node_candidate is not None:
+            node = NODE_RE.match(line)
+            if document.family == "pursuit":
+                if node is not None:
+                    _add_error(
+                        manifest,
+                        f"Pursuit graph nodes are not valid at {document.relative_path}:{line_number}; "
+                        "use a heading for a map item or an ordinary Markdown list for body text",
+                        document.path,
+                        line_number,
+                    )
+                _append_text(parent, line, line_number)
+                continue
             terminal_ancestor = _nearest_ancestor(
                 manifest,
                 stack,
@@ -754,7 +747,6 @@ def _parse_document(
                     document.path,
                     line_number,
                 )
-            node = NODE_RE.match(line)
             node_id = node_candidate.group(1)
             if not is_valid_item_id(node_id):
                 _add_error(

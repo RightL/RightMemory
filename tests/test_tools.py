@@ -1617,7 +1617,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "PURSUITS.md").write_text(
             "# Pursuits\n\n"
             "## Focus\n\n"
-            "- `ship-project` Ship the project.\n\n"
+            "- `ship-project`\n\n"
             "## Ship Project {#ship-project} → [dep:project]\n",
             encoding="utf-8",
         )
@@ -1633,7 +1633,7 @@ class MemoryToolsTests(unittest.TestCase):
         result = self._validate_complete_graph()
         self.assertIn("duplicate id `project`", result)
 
-    def test_validate_memory_does_not_parse_pursuit_next_actions_as_graph_nodes(self):
+    def test_pursuit_body_accepts_code_bullets_without_node_identity(self):
         (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
         (self.root / "PURSUITS.md").write_text(
             "# Pursuits\n\n"
@@ -1650,33 +1650,20 @@ class MemoryToolsTests(unittest.TestCase):
 
         result = self._validate_complete_graph()
 
-        self.assertIn("validation passed", result)
+        self.assertIn("validation passed: 3 ids", result)
 
-    def test_validate_memory_preserves_legacy_next_bullets_without_action_validation(self):
-        (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
-        (self.root / "PURSUITS.md").write_text(
-            "# Pursuits\n\n"
-            "## Investigate {#investigate}\n\n"
-            "**Next:**\n"
-            "- `research` Inspect the evidence.\n",
-            encoding="utf-8",
-        )
 
-        result = self._validate_complete_graph()
-
-        self.assertIn("validation passed", result)
-
-    def test_validate_memory_reserves_pursuit_rules_from_f_backing(self):
+    def test_pursuit_f_backing_uses_current_filename_for_rules_slug(self):
         (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
         (self.root / "PURSUITS.md").write_text(
             "# Pursuits\n\n## Invalid {F#rules}\n",
             encoding="utf-8",
         )
-        (self.root / "PURSUIT_RULES.md").write_text("# Pursuit Rules\n", encoding="utf-8")
+        (self.root / "PURSUIT_rules.md").write_text("# Pursuit Rules\n", encoding="utf-8")
 
         result = self._validate_complete_graph()
 
-        self.assertIn("reserved for the legacy root reference path", result)
+        self.assertIn("validation passed", result)
 
     def test_validate_memory_requires_both_canonical_roots(self):
         (self.root / "MEMORY.md").write_text("# Durable {#durable}\n", encoding="utf-8")
@@ -1748,7 +1735,7 @@ class MemoryToolsTests(unittest.TestCase):
         (self.root / "MEMORY.md").write_text("# Durable {F#durable}\n", encoding="utf-8")
         (self.root / "MEMORY_durable.md").write_text("- `durable-fact` Durable. → []\n", encoding="utf-8")
         (self.root / "PURSUITS.md").write_text("# Pursuits\n\n## Live {F#live}\n", encoding="utf-8")
-        (self.root / "PURSUIT_live.md").write_text("- `live-next` Continue. → [dep:durable-fact]\n", encoding="utf-8")
+        (self.root / "PURSUIT_live.md").write_text("# Continue {#live-next} → [dep:durable-fact]\n", encoding="utf-8")
 
         result = self._validate_complete_graph()
 

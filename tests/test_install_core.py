@@ -4,14 +4,11 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
-from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.async_update import AsyncUpdateJob, AsyncUpdateState
 from rightmemory import install_core
-from rightmemory.install_core import InstallError, InstallTarget, Installer, _posix_data_home
-from rightmemory.update_queue import UpdateCandidate, UpdateQueueStore
+from rightmemory.install_core import InstallError, Installer, _posix_data_home
 
 
 REPO_ROOT = Path(install_core.__file__).resolve().parents[1]
@@ -29,6 +26,18 @@ def _snapshot(root: Path) -> tuple[tuple[str, str, bytes], ...]:
 
 
 class InstallCoreTests(unittest.TestCase):
+    def _existing_installer(self, root: Path, mode: str = "standalone") -> Installer:
+        memory = root / "memory"
+        memory.mkdir()
+        (memory / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+        (memory / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
+        installer = Installer(REPO_ROOT, mode, memory, [root / "skills"])
+        installer.runtime_home = root / "runtime"
+        installer.runtime_venv = installer.runtime_home / "venv"
+        installer.runtime_bin_dir = installer.runtime_home / "bin"
+        installer.runtime_command = installer.runtime_bin_dir / "rightmemory"
+        return installer
+
     def test_source_import_and_clear_error_without_codex_sdk(self):
         script = """
 import importlib.abc
@@ -118,18 +127,6 @@ else:
         self.assertEqual(args.mode, "assistant")
         self.assertEqual(args.paths, ["/memory", "/skills"])
 
-    def test_assistant_mode_does_not_start_internal_worker(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            installer = Installer(REPO_ROOT, "assistant", root / "memory", [root / "skills"])
-            with (
-                patch.object(installer, "_async_update_work_remains") as remains,
-                patch.object(install_core.AsyncUpdateStore, "wake_worker") as wake,
-            ):
-                installer._restart_async_update_worker(True)
-                installer._restart_async_update_worker(False)
-            remains.assert_not_called()
-            wake.assert_not_called()
 
     def test_assistant_mode_selects_native_skill_instead_of_internal_orchestrator(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -159,8 +156,6 @@ else:
             with (
                 patch.object(installer, "_install_skill"),
                 patch.object(installer, "_remove_managed_skill") as remove,
-                patch.object(installer, "_remove_old_skill"),
-                patch.object(installer, "_remove_old_loose_reference"),
                 patch("builtins.print"),
             ):
                 installer._install_skills()
@@ -169,46 +164,161 @@ else:
                 "rightmemory-assistant", target,
             )
 
-    def test_mode_switch_refuses_other_executors_pending_work_without_changes(self):
-        for old, new in (("worker", "assistant"), ("assistant", "standalone")):
-            with self.subTest(old=old, new=new), tempfile.TemporaryDirectory() as tempdir:
+    def test_mode_switch_replaces_the_current_daily_entry(self):
+        for first, second in (("assistant", "standalone"), ("cli-agent", "assistant")):
+            with self.subTest(first=first, second=second), tempfile.TemporaryDirectory() as tempdir:
                 root = Path(tempdir)
-                memory = root / "memory"
-                store = install_core.AsyncUpdateStore(memory, "update", executor=old)
-                job = AsyncUpdateJob(1, "a" * 32, "fixture evidence", "2026-01-01T00:00:00+00:00")
-                state = AsyncUpdateState("running", "fixture", "update", phase="waiting", pending=[job], next_id=2, executor=old)
-                store._write("fixture", state)
-                before = _snapshot(memory)
-                installer = Installer(REPO_ROOT, new, memory, [root / "skills"])
-                with self.assertRaisesRegex(InstallError, "another execution mode"):
+                target = root / "skills"
+                with patch("builtins.print"):
+                    Installer(REPO_ROOT, first, root / "memory", [target])._install_skills()
+                    Installer(REPO_ROOT, second, root / "memory", [target])._install_skills()
+                selected = "rightmemory-assistant" if second == "assistant" else "rightmemory-auto-orchestrator"
+                previous = "rightmemory-auto-orchestrator" if second == "assistant" else "rightmemory-assistant"
+                self.assertTrue((target / selected / "SKILL.md").is_file())
+                self.assertFalse((target / previous).exists())
+
+    def test_mode_switch_preserves_a_daily_skill_with_user_resources(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            target = root / "skills"
+            native = Installer(REPO_ROOT, "assistant", root / "memory", [target])
+            internal = Installer(REPO_ROOT, "standalone", root / "memory", [target])
+            with patch("builtins.print"):
+                native._install_skills()
+                notes = target / "rightmemory-assistant" / "notes.txt"
+                notes.write_bytes(b"local supporting resource\n")
+                internal._install_skills()
+            self.assertTrue((target / "rightmemory-assistant" / "SKILL.md").is_file())
+            self.assertEqual(notes.read_bytes(), b"local supporting resource\n")
+
+    def test_unfinished_tasks_block_installation_before_mutations(self):
+        for mode in ("standalone", "cli-agent", "assistant"):
+            for executor, status in (("native", "active"), ("native", "resume"), ("native", "effects_pending"), ("configured", "resume")):
+                with self.subTest(mode=mode, executor=executor, status=status), tempfile.TemporaryDirectory() as tempdir:
+                    root = Path(tempdir)
+                    installer = self._existing_installer(root, mode)
+                    before = _snapshot(root)
+                    notice = {"domain": "memory", "task_id": "memory-test", "executor": executor, "status": status}
+                    with (
+                        patch("rightmemory.learning_service.LearningService.notices", return_value=[notice]),
+                        patch.object(installer, "_install_runtime") as runtime,
+                        patch.object(installer, "_curation_install_boundary") as boundary,
+                        patch("builtins.print"),
+                    ):
+                        with self.assertRaisesRegex(InstallError, "unfinished curation tasks.*memory-test"):
+                            installer.run()
+                    runtime.assert_not_called()
+                    boundary.assert_not_called()
+                    self.assertEqual(_snapshot(root), before)
+
+    def test_install_waits_for_configured_task_before_runtime_and_restarts_after_stamp(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            installer = self._existing_installer(root)
+            events = []
+            active = {"domain": "skills", "task_id": "skills-test", "executor": "configured", "status": "active"}
+
+            @contextmanager
+            def boundary():
+                events.append("stop-worker")
+                yield True
+                events.append("release-boundary")
+
+            with (
+                patch("rightmemory.learning_service.LearningService.notices", side_effect=[[active], []]),
+                patch.object(installer, "_curation_install_boundary", side_effect=boundary),
+                patch.object(installer, "_ensure_memory_git"),
+                patch.object(installer, "_install_runtime", side_effect=lambda: events.append("install-runtime")),
+                patch.object(installer, "_install_skills"),
+                patch.object(installer, "_warn_if_command_not_on_path"),
+                patch.object(installer, "_write_install_stamp", side_effect=lambda: events.append("stamp")),
+                patch.object(installer, "_restart_curation_worker", side_effect=lambda stopped: events.append(("restart", stopped))),
+                patch.object(installer, "_print_next_steps"),
+                patch("builtins.print"),
+            ):
+                installer.run()
+            self.assertEqual(events, ["stop-worker", "install-runtime", "stamp", "release-boundary", ("restart", True)])
+
+    def test_unfinished_task_after_worker_boundary_blocks_runtime_replacement(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            installer = self._existing_installer(root)
+            active = {"domain": "guidance", "task_id": "guidance-test", "executor": "configured", "status": "effects_pending"}
+
+            @contextmanager
+            def boundary():
+                yield True
+
+            before = _snapshot(root)
+            with (
+                patch("rightmemory.learning_service.LearningService.notices", return_value=[active]),
+                patch.object(installer, "_curation_install_boundary", side_effect=boundary),
+                patch.object(installer, "_install_runtime") as runtime,
+                patch("builtins.print"),
+            ):
+                with self.assertRaisesRegex(InstallError, "unfinished curation tasks"):
                     installer.run()
-                self.assertEqual(_snapshot(memory), before)
-                self.assertFalse((root / "skills").exists())
+            runtime.assert_not_called()
+            self.assertEqual(_snapshot(root), before)
 
-    def test_assistant_mode_refuses_orphan_worker_outbox_without_cleanup(self):
+    def test_worker_stop_timeout_prevents_runtime_changes(self):
         with tempfile.TemporaryDirectory() as tempdir:
-            memory = Path(tempdir) / "memory"
-            queue = UpdateQueueStore(memory)
-            queue.write_outbox(UpdateCandidate(
-                uid="a" * 32, submitted_at="2026-01-01T00:00:00+00:00",
-                display_id=1, session_id="interrupted-worker", message="fixture evidence",
-            ))
-            temporary = queue.outbox_root / (".999999999." + "b" * 32 + ".tmp")
-            temporary.write_text("preserve on refusal", encoding="utf-8")
-            before = _snapshot(memory)
-            with self.assertRaisesRegex(InstallError, "another execution mode"):
-                Installer(REPO_ROOT, "assistant", memory, [])._require_compatible_update_executor()
-            self.assertEqual(_snapshot(memory), before)
+            root = Path(tempdir)
+            installer = self._existing_installer(root)
+            before = _snapshot(root)
 
-    def test_same_executor_reinstall_preserves_pending_work(self):
+            @contextmanager
+            def timeout():
+                raise TimeoutError("worker busy")
+                yield
+
+            with (
+                patch("rightmemory.learning_service.LearningService.notices", return_value=[]),
+                patch("rightmemory.curation_worker.CurationWorker.install_boundary", side_effect=timeout),
+                patch.object(installer, "_install_runtime") as runtime,
+                patch("builtins.print"),
+            ):
+                with self.assertRaisesRegex(InstallError, "safe stop boundary"):
+                    installer.run()
+            runtime.assert_not_called()
+            self.assertEqual(_snapshot(root), before)
+
+    def test_restart_uses_installed_python_for_stopped_worker_or_ready_candidates(self):
+        for was_running, ready in ((True, False), (False, True), (False, False)):
+            with self.subTest(was_running=was_running, ready=ready), tempfile.TemporaryDirectory() as tempdir:
+                root = Path(tempdir)
+                installer = self._existing_installer(root)
+                installer.runtime_python = root / "installed-python"
+                with (
+                    patch("rightmemory.learning_service.LearningService.notices", return_value=[{"domain": "memory", "ready": ready}]),
+                    patch("rightmemory.curation_worker.CurationWorker.wake") as wake,
+                    patch("builtins.print"),
+                ):
+                    installer._restart_curation_worker(was_running)
+                if was_running or ready:
+                    wake.assert_called_once_with(python_executable=installer.runtime_python)
+                else:
+                    wake.assert_not_called()
+
+    def test_assistant_install_never_starts_configured_worker(self):
         with tempfile.TemporaryDirectory() as tempdir:
-            memory = Path(tempdir) / "memory"
-            store = install_core.AsyncUpdateStore(memory, "update", executor="assistant")
-            job = AsyncUpdateJob(1, "a" * 32, "fixture evidence", "2026-01-01T00:00:00+00:00")
-            store._write("fixture", AsyncUpdateState("running", "fixture", "update", phase="waiting", pending=[job], next_id=2, executor="assistant"))
-            before = _snapshot(memory)
-            Installer(REPO_ROOT, "assistant", memory, [])._require_compatible_update_executor()
-            self.assertEqual(_snapshot(memory), before)
+            installer = self._existing_installer(Path(tempdir), "assistant")
+            with patch("rightmemory.curation_worker.CurationWorker.wake") as wake:
+                installer._restart_curation_worker(True)
+            wake.assert_not_called()
+
+    def test_invalid_current_graph_blocks_installation_before_mutations(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            installer = self._existing_installer(root)
+            (installer.memory_root / "MEMORY.md").write_text("# Missing backing {F#missing}\n", encoding="utf-8")
+            before = _snapshot(root)
+            with patch.object(installer, "_install_runtime") as runtime, patch("builtins.print"):
+                with self.assertRaisesRegex(InstallError, "existing RightMemory root is invalid"):
+                    installer.run()
+            runtime.assert_not_called()
+            self.assertEqual(_snapshot(root), before)
+
 
     def test_empty_xdg_data_home_uses_standard_default(self):
         home = Path("test-home")
@@ -271,67 +381,6 @@ else:
                     self.assertFalse((target / "memory-retriever").exists())
                     self.assertFalse((target / "rightmemory-orchestrator").exists())
 
-    def test_install_skills_replaces_managed_variants_and_keeps_independent_skills(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            target = root / "skills"
-            target.mkdir()
-            installer = Installer(REPO_ROOT, "standalone", root / "memory", [target])
-            previous_defaults = (
-                ("memory-retriever-cli", "memory-retriever"),
-                ("rightmemory-orchestrator-cli", "rightmemory-orchestrator"),
-                ("maintain-rightmemory", "maintain-rightmemory"),
-                ("maintain-agent-guidance", "maintain-agent-guidance"),
-            )
-            with patch("builtins.print"):
-                for source_directory, skill_name in previous_defaults:
-                    installer._install_skill(
-                        REPO_ROOT / "skills" / source_directory / "SKILL.md",
-                        skill_name,
-                        target,
-                    )
-            modified = target / "memory-retriever" / "SKILL.md"
-            modified.write_text(
-                "User-owned file.\n",
-                encoding="utf-8",
-            )
-
-            with patch("builtins.print"):
-                installer._install_skills()
-
-            self.assertTrue(modified.is_file())
-            self.assertFalse((target / "rightmemory-orchestrator").exists())
-            self.assertTrue((target / "maintain-rightmemory" / "SKILL.md").is_file())
-            self.assertTrue((target / "maintain-agent-guidance" / "SKILL.md").is_file())
-            self.assertTrue((target / "maintain-work-skills" / "SKILL.md").is_file())
-            self.assertTrue((target / "maintain-pursuit-map" / "SKILL.md").is_file())
-            self.assertTrue((target / "rightmemory-manager" / "SKILL.md").is_file())
-            self.assertTrue((target / "rightmemory-auto-orchestrator" / "SKILL.md").is_file())
-
-    def test_retired_guidance_review_cleanup_preserves_customized_directories(self):
-        managed = b"managed fixture\n"
-        for variant in ("managed", "customized", "extra-file"):
-            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as tempdir:
-                root = Path(tempdir)
-                target = root / "skills"
-                directory = target / "review-agent-guidance-inbox"
-                directory.mkdir(parents=True)
-                (directory / "SKILL.md").write_bytes(
-                    managed + b"custom change\n" if variant == "customized" else managed
-                )
-                if variant == "extra-file":
-                    (directory / "notes.txt").write_bytes(b"user notes")
-                before = _snapshot(directory)
-                installer = Installer(REPO_ROOT, "assistant", root / "memory", [target])
-                with (
-                    patch.object(install_core, "RETIRED_GUIDANCE_REVIEW_SHA256", sha256(managed).hexdigest()),
-                    patch("builtins.print"),
-                ):
-                    installer._remove_retired_guidance_review(target)
-                if variant == "managed":
-                    self.assertFalse(directory.exists())
-                else:
-                    self.assertEqual(_snapshot(directory), before)
 
     def test_install_refuses_learning_only_root_without_mutation(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -365,40 +414,20 @@ else:
             self.assertEqual(_snapshot(memory), before)
             self.assertFalse((root / "skills").exists())
 
-    def test_remove_old_loose_reference_accepts_managed_bytes_and_known_line_endings(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            canonical = root / "canonical.bin"
-            canonical.write_bytes(b"managed-data\n")
-            installer = Installer(REPO_ROOT, "standalone", root / "memory", [root / "skills"])
-            for index, content in enumerate((b"managed-data\n", b"managed-data\r\n")):
-                target = root / f"target-{index}"
-                target.mkdir()
-                legacy = target / "rightmemory-schema.md"
-                legacy.write_bytes(content)
-                with (
-                    patch("builtins.print"),
-                    patch.dict(
-                        install_core.LEGACY_LOOSE_REFERENCE_SHA256,
-                        {"rightmemory-schema.md": install_core.sha256(b"managed-data\n").hexdigest()},
-                    ),
-                ):
-                    installer._remove_old_loose_reference(target, legacy.name, canonical)
-                self.assertFalse(legacy.exists())
 
-    def test_install_skills_preserves_modified_loose_reference(self):
+    def test_install_skills_preserves_unowned_files(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             target = root / "skills"
             target.mkdir()
-            legacy = target / "rightmemory-schema.md"
-            legacy.write_text("# User-owned reference\n", encoding="utf-8")
+            notes = target / "notes.txt"
+            notes.write_bytes(b"User-owned notes\n")
             installer = Installer(REPO_ROOT, "standalone", root / "memory", [target])
 
             with patch("builtins.print"):
                 installer._install_skills()
 
-            self.assertEqual(legacy.read_text(encoding="utf-8"), "# User-owned reference\n")
+            self.assertEqual(notes.read_bytes(), b"User-owned notes\n")
 
     def test_existing_install_preserves_semantic_state_byte_for_byte(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -542,119 +571,6 @@ else:
             self.assertEqual(_snapshot(memory_root), before_memory)
             self.assertEqual(_snapshot(skills_target), before_skills)
             self.assertEqual(_snapshot(runtime_home), before_runtime)
-
-    def test_existing_root_with_legacy_references_is_rejected_without_writes(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            skills_target = root / "skills"
-            memory_root.mkdir()
-            (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-            (memory_root / "PURSUITS.md").write_text("# Pursuits\n", encoding="utf-8")
-            for name in ("PURSUIT_RULES.md", "AGENT_CORRECTION_MEMORY_RULES.md"):
-                (memory_root / name).write_text(f"# Custom {name}\n", encoding="utf-8")
-            before = _snapshot(memory_root)
-            installer = Installer(REPO_ROOT, "cli-agent", memory_root, [skills_target])
-
-            with (
-                patch.object(installer, "_inspect_target_git", return_value=(True, None)),
-                patch.object(installer, "_print_layout"),
-            ):
-                with self.assertRaisesRegex(
-                    InstallError,
-                    "legacy package-reference files: "
-                    "PURSUIT_RULES.md, AGENT_CORRECTION_MEMORY_RULES.md",
-                ) as raised:
-                    installer.run()
-
-            self.assertIn("remove them explicitly", str(raised.exception))
-            self.assertEqual(_snapshot(memory_root), before)
-            self.assertFalse(skills_target.exists())
-
-    def test_install_quiesces_worker_before_runtime_and_restarts_after_stamp(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            installer = Installer(REPO_ROOT, "cli-agent", root / "memory", [root / "skills"])
-            target = InstallTarget("new", False, (), ())
-            events = []
-
-            @contextmanager
-            def install_boundary():
-                events.append("quiesce")
-                yield True
-
-            with (
-                patch.object(installer, "_inspect_target", return_value=target),
-                patch.object(installer, "_print_layout"),
-                patch.object(
-                    installer,
-                    "_async_update_install_boundary",
-                    side_effect=install_boundary,
-                ),
-                patch.object(installer, "_bootstrap_state"),
-                patch.object(installer, "_ensure_memory_git"),
-                patch.object(
-                    installer,
-                    "_install_runtime",
-                    side_effect=lambda: events.append("install-runtime"),
-                ),
-                patch.object(installer, "_install_skills"),
-                patch.object(installer, "_warn_if_command_not_on_path"),
-                patch.object(
-                    installer,
-                    "_write_install_stamp",
-                    side_effect=lambda: events.append("stamp"),
-                ),
-                patch.object(
-                    installer,
-                    "_restart_async_update_worker",
-                    side_effect=lambda was_running: events.append(f"restart:{was_running}"),
-                ),
-                patch.object(installer, "_print_next_steps"),
-            ):
-                installer.run()
-
-        self.assertEqual(
-            events,
-            ["quiesce", "install-runtime", "stamp", "restart:True"],
-        )
-
-    def test_install_refuses_before_runtime_change_when_worker_cannot_stop(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            installer = Installer(
-                REPO_ROOT,
-                "cli-agent",
-                Path(tempdir) / "memory",
-                [Path(tempdir) / "skills"],
-            )
-
-            with patch(
-                "rightmemory.install_core.AsyncUpdateStore.runtime_install_locked",
-                side_effect=TimeoutError("busy"),
-            ):
-                with self.assertRaisesRegex(InstallError, "did not reach a safe stop boundary"):
-                    with installer._async_update_install_boundary():
-                        pass
-
-    def test_pending_synchronized_queue_starts_newly_installed_worker(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            memory_root = root / "memory"
-            candidate = UpdateCandidate(
-                uid="a" * 32,
-                session_id="agent-session",
-                display_id=1,
-                message="pending synchronized evidence",
-                submitted_at="2026-08-18T09:00:00+00:00",
-            )
-            UpdateQueueStore(memory_root).write_candidate(candidate)
-            installer = Installer(REPO_ROOT, "cli-agent", memory_root, [root / "skills"])
-            installer.runtime_python = root / "runtime" / "python"
-
-            with patch("rightmemory.install_core.AsyncUpdateStore.wake_worker") as wake_worker:
-                installer._restart_async_update_worker(False)
-
-        wake_worker.assert_called_once_with(python_executable=installer.runtime_python)
 
 
 if __name__ == "__main__":

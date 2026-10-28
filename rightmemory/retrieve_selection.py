@@ -22,7 +22,6 @@ from .graph import (
     build_graph_manifest,
     is_valid_item_id,
 )
-from .recent_submitted import RecentSubmittedMemoryEntry
 from .learning_retrieval import get_learning_source, is_learning_source_id
 from .shared_view_models import load_connections
 from .shared_view_package import FileViewPackageError, ValidatedFileViewPackage, validate_file_view_package
@@ -102,7 +101,6 @@ class RetrieveSelection(BaseModel):
 
     ids: list[str] = Field(default_factory=list)
     sources: list[SourceSelection] = Field(default_factory=list)
-    recent_candidates: list[str] = Field(default_factory=list)
 
     @field_validator("ids")
     @classmethod
@@ -110,14 +108,6 @@ class RetrieveSelection(BaseModel):
         for value in values:
             if not is_valid_item_id(value):
                 raise ValueError(f"invalid local graph id: {value!r}")
-        return values
-
-    @field_validator("recent_candidates")
-    @classmethod
-    def validate_recent_candidates(cls, values: list[str]) -> list[str]:
-        for value in values:
-            if not value or value != value.strip():
-                raise ValueError("recent candidate ids must be non-empty and must not contain outer whitespace")
         return values
 
 
@@ -135,7 +125,6 @@ class RetrieveDeliveryCoverage:
     source_items: dict[str, str] = field(default_factory=dict)
     complete_sources: dict[str, str] = field(default_factory=dict)
     ranges: list[DeliveredRange] = field(default_factory=list)
-    recent_candidates: dict[str, str] = field(default_factory=dict)
 
     def merged(self, newer: RetrieveDeliveryCoverage) -> RetrieveDeliveryCoverage:
         local_items = {**self.local_items, **newer.local_items}
@@ -158,13 +147,11 @@ class RetrieveDeliveryCoverage:
                 ranges.append(item)
                 known_ranges.add(key)
 
-        recent = {**self.recent_candidates, **newer.recent_candidates}
         return RetrieveDeliveryCoverage(
             local_items=local_items,
             source_items=source_items,
             complete_sources=complete_sources,
             ranges=ranges,
-            recent_candidates=recent,
         )
 
 
@@ -172,7 +159,6 @@ class RetrieveDeliveryCoverage:
 class RenderedRetrieveSelection:
     text: str
     delivery: RetrieveDeliveryCoverage
-    recent_entries: list[RecentSubmittedMemoryEntry]
 
 
 @dataclass(frozen=True)
@@ -199,10 +185,7 @@ class RetrieveSelectionRenderer:
     def render(
         self,
         selection: RetrieveSelection,
-        *,
-        recent_entries: list[RecentSubmittedMemoryEntry] | None = None,
     ) -> RenderedRetrieveSelection:
-        recent_entries = recent_entries or []
         manifest = build_graph_manifest(self.memory_root)
 
         local_text, local_delivery = self._render_local(selection.ids, manifest)
@@ -210,19 +193,12 @@ class RetrieveSelectionRenderer:
             selection.sources,
             manifest,
         )
-        recent_text, selected_recent = self._render_recent(
-            selection.recent_candidates,
-            recent_entries,
-        )
-
         sections: list[str] = []
         if local_text:
             sections.append(local_text)
         for source in sorted(source_sections, key=lambda item: (item.rank, item.source_id)):
             if source.text:
                 sections.append(f"Source: `{source.source_id}`\n\n{source.text}")
-        if recent_text:
-            sections.append(recent_text)
         output = "\n\n".join(
             section.rstrip("\r\n") for section in sections if section.strip()
         ).strip("\r\n")
@@ -246,18 +222,13 @@ class RetrieveSelectionRenderer:
             source_items=source_items,
             complete_sources=complete_sources,
             ranges=delivered_ranges,
-            recent_candidates={
-                _candidate_selection_id(entry): _hash_text(_rstrip_newlines(entry.message))
-                for entry in selected_recent
-            },
         )
-        return RenderedRetrieveSelection(output, delivery, selected_recent)
+        return RenderedRetrieveSelection(output, delivery)
 
     def current_delivery_selection(
         self,
         delivered: RetrieveDeliveryCoverage,
         *,
-        recent_entries: list[RecentSubmittedMemoryEntry] | None = None,
         unchanged_only: bool = False,
     ) -> RetrieveSelection:
         """Return the currently selectable form of previously delivered coverage."""
@@ -360,19 +331,6 @@ class RetrieveSelectionRenderer:
                 for start, end in _merge_intervals(intervals)
             )
 
-        recent_candidates = [
-            selection_id
-            for entry in (recent_entries or [])
-            if (
-                (selection_id := _candidate_selection_id(entry))
-                in delivered.recent_candidates
-                and (
-                    not unchanged_only
-                    or delivered.recent_candidates[selection_id]
-                    == _hash_text(_rstrip_newlines(entry.message))
-                )
-            )
-        ]
         sources = [
             SourceSelection(
                 source_id=source_id,
@@ -388,23 +346,18 @@ class RetrieveSelectionRenderer:
         return RetrieveSelection(
             ids=local_ids,
             sources=sources,
-            recent_candidates=recent_candidates,
         )
 
     def changed_delivery_labels(
         self,
         delivered: RetrieveDeliveryCoverage,
-        *,
-        recent_entries: list[RecentSubmittedMemoryEntry] | None = None,
     ) -> list[str]:
         """Describe selectable delivered material whose current content changed."""
         current = self.current_delivery_selection(
             delivered,
-            recent_entries=recent_entries,
         )
         unchanged = self.current_delivery_selection(
             delivered,
-            recent_entries=recent_entries,
             unchanged_only=True,
         )
         manifest = build_graph_manifest(self.memory_root)
@@ -450,12 +403,6 @@ class RetrieveSelectionRenderer:
                 and _hash_text(text) not in old_hashes
             ):
                 labels.append(f"source `{source_id}`")
-        old_recent = set(unchanged.recent_candidates)
-        labels.extend(
-            f"recent candidate `{candidate_id}`"
-            for candidate_id in current.recent_candidates
-            if candidate_id not in old_recent
-        )
         return list(dict.fromkeys(labels))
 
     def _current_linked_source_text(
@@ -924,37 +871,12 @@ class RetrieveSelectionRenderer:
                 f"missing or invalid canonical mirrored view `{source_id}`: {exc}"
             ) from exc
 
-    def _render_recent(
-        self,
-        requested_ids: list[str],
-        entries: list[RecentSubmittedMemoryEntry],
-    ) -> tuple[str, list[RecentSubmittedMemoryEntry]]:
-        by_id = {_candidate_selection_id(entry): entry for entry in entries}
-        requested = set(_unique(requested_ids))
-        unknown = sorted(requested - set(by_id))
-        if unknown:
-            raise RetrieveSelectionError(f"unknown recent candidate id `{unknown[0]}`")
-        selected = [
-            entry
-            for entry in entries
-            if _candidate_selection_id(entry) in requested
-        ]
-        blocks = []
-        for entry in selected:
-            selection_id = _candidate_selection_id(entry)
-            blocks.append(
-                f"Recent submitted evidence: `{selection_id}`\n"
-                f"Submitted at: {entry.submitted_at}\n\n"
-                f"{_rstrip_newlines(entry.message)}"
-            )
-        return "\n\n".join(blocks), selected
-
 
 def parse_retrieve_selection_json(value: str) -> RetrieveSelection:
     try:
         decoded = json.loads(value)
-        if not isinstance(decoded, dict) or set(decoded) != {"ids", "sources", "recent_candidates"}:
-            raise ValueError("top-level JSON must contain exactly ids, sources, and recent_candidates")
+        if not isinstance(decoded, dict) or set(decoded) != {"ids", "sources"}:
+            raise ValueError("top-level JSON must contain exactly ids and sources")
         sources = decoded.get("sources")
         if not isinstance(sources, list):
             raise ValueError("sources must be a list")
@@ -1176,10 +1098,6 @@ def _subtract_intervals(
             pieces = next_pieces
         remaining.extend(pieces)
     return remaining
-
-
-def _candidate_selection_id(entry: RecentSubmittedMemoryEntry) -> str:
-    return f"{entry.update_session_id}:{entry.candidate_id}"
 
 
 def _unique(values: Iterable[str]) -> list[str]:

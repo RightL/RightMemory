@@ -53,7 +53,6 @@ class WindowsInstallScriptTests(unittest.TestCase):
             guidance_maintainer_exists = (
                 skills_target / "maintain-agent-guidance" / "SKILL.md"
             ).is_file()
-            legacy_orchestrator_exists = (skills_target / "memory-orchestrator").exists()
             leaked_requirement_file = (root / "3.11").exists()
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -79,7 +78,6 @@ class WindowsInstallScriptTests(unittest.TestCase):
         self.assertTrue(manager_exists)
         self.assertTrue(guidance_maintainer_exists)
         self.assertIn("rightmemory-auto-orchestrator", result.stdout)
-        self.assertFalse(legacy_orchestrator_exists)
         self.assertIn('set "PYTHONUTF8=1"', wrapper_text)
         self.assertIn('set "RIGHTMEMORY_ROOT=', wrapper_text)
         self.assertIn(str(memory_root), wrapper_text)

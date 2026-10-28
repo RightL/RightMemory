@@ -12,13 +12,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .async_update import STATUS_MANUAL_RECOVERY, _is_async_worker_process, _is_legacy_failed_pending_state, _state_from_json
 from .config import load_insight_watch_config, load_sync_config
 from .platform import lock_file_nonblocking, process_identity, unlock_file
 from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .sync import read_sync_state
 from .watch import MANAGED_WATCH_TARGETS, ManagedWatchStatus, _is_managed_watch_process, watch_log_path, watch_pid_path
-from .update_queue import UpdateQueueStore
 
 
 MAX_PREVIEW_CHARS = 300
@@ -68,7 +66,7 @@ class DashboardStatus:
     sync: SyncStatus | None = None
     watches: list[SectionStatus] = field(default_factory=list)
     insight: SectionStatus | None = None
-    update: SectionStatus | None = None
+    curation: SectionStatus | None = None
     operations: SectionStatus | None = None
     issues: list[str] = field(default_factory=list)
 
@@ -338,158 +336,29 @@ def collect_insight_section(
         )
 
 
-def collect_async_update_section(
-    memory_root: Path,
-    *,
-    process_exists: Callable[[int], bool] | None = None,
-) -> tuple[SectionStatus, list[str]]:
-    if process_exists is None:
-        process_exists = _update_worker_process_exists
-    async_root = Path(memory_root) / ".runtime" / "async" / "update"
-    worker_state, worker_issue = _read_worker_state(async_root, process_exists)
-    try:
-        session_states = [
-            (path, _state_from_json(_read_json(path)))
-            for path in sorted(async_root.glob("*.json"))
-            if path.is_file()
-        ]
-    except Exception as exc:
-        issue = f"update: state error: {type(exc).__name__}: {exc}"
-        return (
-            SectionStatus(
-                name="update",
-                state=f"state error: {type(exc).__name__}: {exc}",
-                detail=f"state: {_display_path(Path(memory_root), async_root)}",
-                issue=issue,
-            ),
-            [issue],
-        )
-    try:
-        queue_snapshot = UpdateQueueStore(Path(memory_root)).snapshot()
-    except Exception as exc:
-        issue = f"update: synchronized queue error: {type(exc).__name__}: {exc}"
-        return (
-            SectionStatus(
-                name="update",
-                state=f"queue error: {type(exc).__name__}: {exc}",
-                detail=f"state: {_display_path(Path(memory_root), async_root)}",
-                issue=issue,
-            ),
-            [issue],
-        )
+def collect_curation_section(memory_root: Path) -> tuple[SectionStatus, list[str]]:
+    from .curation_worker import CurationWorker
+    from .learning import list_learning_candidates
+    from .learning_service import LearningService
 
-    pending_candidates = 0
-    pending_sessions = 0
-    retrying_candidates = 0
-    retrying_sessions = 0
-    manual_candidates = 0
-    manual_sessions = 0
-    current_candidates = 0
-    current_sessions = 0
-    flush_times: list[str] = []
-    last_values: list[tuple[str, str, str]] = []
-    issues = [worker_issue] if worker_issue else []
-
-    for path, state in session_states:
-        pending = state.pending
-        current = state.current_batch
-        manual_recovery = state.status == STATUS_MANUAL_RECOVERY or _is_legacy_failed_pending_state(state)
-        retrying = bool(pending or current) and state.status == "failed" and not manual_recovery
-        normal_pending = state.status == "running" and bool(pending)
-        running_current = state.status == "running" and state.phase == "running" and bool(current)
-        if (pending or current) and manual_recovery:
-            manual_candidates += len(pending) + len(current)
-            manual_sessions += 1
-        elif (pending or current) and retrying:
-            retrying_candidates += len(pending) + len(current)
-            retrying_sessions += 1
-        elif pending and normal_pending:
-            pending_candidates += len(pending)
-            pending_sessions += 1
-        elif pending:
-            pending_candidates += len(pending)
-            pending_sessions += 1
-        if running_current:
-            current_candidates += len(current)
-            current_sessions += 1
-        next_flush_at = state.next_flush_at
-        if next_flush_at:
-            flush_times.append(next_flush_at)
-        if state.error:
-            error_preview = _cap_preview(str(state.error)).splitlines()[0]
-            if manual_recovery:
-                issues.append(f"update: {state.session_id}: manual recovery required: {error_preview}")
-            elif retrying:
-                issues.append(f"update: {state.session_id}: retrying after error: {error_preview}")
-            else:
-                issues.append(f"update: {state.session_id}: error: {error_preview}")
-            last_values.append((_async_outcome_time(path, state), path.name, f"error: {state.error}"))
-        elif state.result:
-            last_values.append((_async_outcome_time(path, state), path.name, state.result))
-
-    detail_lines = [
-        (
-            f"pending: {pending_candidates} {_plural('candidate', pending_candidates)} "
-            f"across {pending_sessions} {_plural('session', pending_sessions)}"
-        ),
-        (
-            f"retrying: {retrying_candidates} {_plural('candidate', retrying_candidates)} "
-            f"across {retrying_sessions} {_plural('session', retrying_sessions)}"
-        ),
-        (
-            f"manual recovery: {manual_candidates} {_plural('candidate', manual_candidates)} "
-            f"across {manual_sessions} {_plural('session', manual_sessions)}"
-        ),
-        (
-            f"current batch: {current_candidates} {_plural('candidate', current_candidates)} "
-            f"across {current_sessions} {_plural('session', current_sessions)}"
-        ),
-        f"state: {_display_path(Path(memory_root), async_root)}",
-    ]
-    if queue_snapshot.candidates or queue_snapshot.lease or queue_snapshot.recoveries:
-        leased = set(
-            () if queue_snapshot.lease is None else queue_snapshot.lease.candidate_uids
-        )
-        recovering = {
-            uid for recovery in queue_snapshot.recoveries for uid in recovery.candidate_uids
-        }
-        fresh = {
-            candidate.uid
-            for candidate in queue_snapshot.candidates
-            if candidate.uid not in leased and candidate.uid not in recovering
-        }
-        manual = sum(
-            len(recovery.candidate_uids)
-            for recovery in queue_snapshot.recoveries
-            if recovery.manual_recovery
-        )
-        retrying = sum(
-            len(recovery.candidate_uids)
-            for recovery in queue_snapshot.recoveries
-            if not recovery.manual_recovery and recovery.batch_id
-            != (queue_snapshot.lease.batch_id if queue_snapshot.lease else None)
-        )
-        detail_lines.insert(
-            -1,
-            "synchronized: "
-            f"{len(fresh)} pending, {len(leased)} leased, "
-            f"{retrying} retrying, {manual} manual recovery",
-        )
-    if flush_times:
-        detail_lines.insert(1, f"next flush: {min(flush_times)}")
-    if worker_state.detail:
-        detail_lines.insert(0, worker_state.detail)
-    last_value = max(last_values, key=lambda item: (item[0], item[1]))[2] if last_values else None
-    return (
-        SectionStatus(
-            name="update",
-            state=worker_state.state,
-            detail="\n".join(detail_lines),
-            last=_cap_preview(last_value) if last_value else None,
-            issue=worker_issue,
-        ),
-        issues,
-    )
+    root = Path(memory_root)
+    worker = CurationWorker(root).status()
+    notices = LearningService(root).notices()
+    candidates = list_learning_candidates(root)
+    issues = [f"curation: {worker['error']}"] if worker.get("error") else []
+    detail = [f"pending sources: {len(candidates)}"]
+    for notice in notices:
+        detail.append(f"{notice['domain']}: {notice['status']}; {notice['candidate_count']} pending")
+        if notice.get("task_id"):
+            detail.append(f"  task: {notice['task_id']}")
+    detail.append("state: learning/ and .runtime/learning/")
+    state = "running" if worker["live"] else "needs recovery" if issues else "idle"
+    return SectionStatus(
+        name="curation", state=state, detail="\n".join(detail),
+        log_path=_display_path(root, Path(worker["log_path"])),
+        log_missing=not Path(worker["log_path"]).is_file(),
+        issue=issues[0] if issues else None,
+    ), issues
 
 
 def collect_semantic_operation_section(memory_root: Path) -> tuple[SectionStatus, list[str]]:
@@ -530,7 +399,7 @@ def collect_status(
     sync_collector: Callable[[Path], SyncStatus] | None = None,
     watch_collector: Callable[[Path], tuple[list[SectionStatus], list[str]]] | None = None,
     insight_collector: Callable[[Path], SectionStatus] = collect_insight_section,
-    update_collector: Callable[[Path], tuple[SectionStatus, list[str]]] = collect_async_update_section,
+    curation_collector: Callable[[Path], tuple[SectionStatus, list[str]]] = collect_curation_section,
     operation_collector: Callable[[Path], tuple[SectionStatus, list[str]]] = collect_semantic_operation_section,
 ) -> DashboardStatus:
     root = Path(memory_root)
@@ -575,12 +444,11 @@ def collect_status(
         issues.append(message)
 
     try:
-        update, update_issues = update_collector(root)
-        update = _with_queue_view(update, sync)
-        issues.extend(update_issues)
+        curation, curation_issues = curation_collector(root)
+        issues.extend(curation_issues)
     except Exception as exc:
-        message = f"update: status error: {type(exc).__name__}: {exc}"
-        update = SectionStatus(name="update", state=message, issue=message)
+        message = f"curation: status error: {type(exc).__name__}: {exc}"
+        curation = SectionStatus(name="curation", state=message, issue=message)
         issues.append(message)
 
     try:
@@ -597,7 +465,7 @@ def collect_status(
         sync=sync,
         watches=watches,
         insight=insight,
-        update=update,
+        curation=curation,
         operations=operations,
         issues=issues,
     )
@@ -625,10 +493,10 @@ def format_status_dashboard(status: DashboardStatus) -> str:
         lines.append("Insight")
         lines.extend(_format_section(status.insight))
 
-    if status.update is not None:
+    if status.curation is not None:
         lines.append("")
-        lines.append("Async Update")
-        lines.extend(_format_section(status.update))
+        lines.append("Curation")
+        lines.extend(_format_section(status.curation))
 
     if status.operations is not None:
         lines.append("")
@@ -686,49 +554,17 @@ def _recovery_hint_for_issue(issue: str) -> str | None:
         return "sync: rerun `rightmemory status`; inspect Git and sync configuration if it persists"
     if issue.startswith("insight trigger error:"):
         return "insight: inspect `.runtime/insight/trigger-state.json`"
-    if issue.startswith("update worker: stale pid "):
-        return (
-            "update worker: inspect `.runtime/async/update/`; "
-            "run `rightmemory update retry` only for manual recovery"
-        )
-    if issue.startswith("update worker: state error:"):
-        return "update worker: inspect `.runtime/async/update/_worker/state.json`"
-    if issue.startswith("update: state error:"):
-        return "update: inspect `.runtime/async/update/` for malformed session JSON"
     if issue.startswith("managed watches: status error:"):
         return "managed watches: rerun `rightmemory status`; inspect watch state if it persists"
     if issue.startswith("insight: status error:"):
         return "insight: rerun `rightmemory status`; inspect insight state if it persists"
-    if issue.startswith("update: status error:"):
-        return "update: rerun `rightmemory status`; inspect async update state if it persists"
     if issue.startswith("semantic operations: status error:"):
         return "semantic operations: inspect `.runtime/operations/records/`"
     if issue.startswith("semantic effect:"):
         return "semantic effects: inspect `.runtime/operations/records/`; later semantic turns retry pending effects"
-    update_hint = _update_recovery_hint(issue)
-    if update_hint:
-        return update_hint
+    if issue.startswith("curation:"):
+        return "curation: inspect `rightmemory curate status`; resume the indicated task or wake the configured worker"
     return _watch_recovery_hint(issue)
-
-
-def _update_recovery_hint(issue: str) -> str | None:
-    match = re.match(r"^update: ([^:]+): manual recovery required:", issue)
-    if match:
-        return "update manual recovery: run `rightmemory update retry`"
-    match = re.match(r"^update: ([^:]+): retrying after error:", issue)
-    if match:
-        session_id = match.group(1)
-        quoted_session = shlex.quote(session_id)
-        return (
-            f"update {session_id}: automatic retry is pending; "
-            f"inspect with `rightmemory update pull --session {quoted_session}`"
-        )
-    match = re.match(r"^update: ([^:]+): error:", issue)
-    if match:
-        session_id = match.group(1)
-        quoted_session = shlex.quote(session_id)
-        return f"update {session_id}: inspect with `rightmemory update pull --session {quoted_session}`"
-    return None
 
 
 def _watch_recovery_hint(issue: str) -> str | None:
@@ -793,32 +629,6 @@ def _format_sync_status(status: SyncStatus) -> list[str]:
     return lines
 
 
-def _with_queue_view(section: SectionStatus, sync: SyncStatus) -> SectionStatus:
-    if sync.ahead is None or sync.behind is None:
-        queue_view = "queue view: local checkout only; upstream comparison unavailable"
-    elif sync.ahead > 0 and sync.behind > 0:
-        queue_view = (
-            "queue view: checkout is diverged; counts may be incomplete "
-            "and include local state not yet present upstream"
-        )
-    elif sync.behind > 0:
-        queue_view = "queue view: local checkout only; counts may be incomplete"
-    elif sync.ahead > 0:
-        queue_view = "queue view: checkout contains local state not yet present upstream"
-    else:
-        queue_view = "queue view: current with upstream"
-
-    detail_lines = [
-        line for line in (section.detail or "").splitlines() if not line.startswith("queue view:")
-    ]
-    insert_at = next(
-        (index for index, line in enumerate(detail_lines) if line.startswith("state: ")),
-        len(detail_lines),
-    )
-    detail_lines.insert(insert_at, queue_view)
-    return replace(section, detail="\n".join(detail_lines))
-
-
 def _cap_preview(text: str) -> str:
     lines = text.splitlines()[:MAX_PREVIEW_LINES]
     preview = "\n".join(lines)
@@ -849,10 +659,6 @@ def _latest_log_event_lines(lines: list[str]) -> list[str]:
         if LOG_EVENT_PATTERN.match(lines[index]):
             return lines[index:]
     return lines
-
-
-def _update_worker_process_exists(pid: int) -> bool:
-    return _is_async_worker_process(pid, "update")
 
 
 def _display_path(memory_root: Path, path: Path) -> str:
@@ -889,54 +695,6 @@ def _watch_lock_held_read_only(memory_root: Path, name: str) -> bool:
     except OSError:
         return False
     return False
-
-
-@dataclass(frozen=True)
-class _WorkerSummary:
-    state: str
-    detail: str | None = None
-
-
-def _read_worker_state(async_root: Path, process_exists: Callable[[int], bool]) -> tuple[_WorkerSummary, str | None]:
-    path = async_root / "_worker" / "state.json"
-    if not path.exists():
-        return _WorkerSummary(state="worker: idle"), None
-    try:
-        data = _read_json(path)
-        status = _required_worker_str(data, "status")
-        pid = _optional_worker_int(data, "pid")
-        identity = _optional_worker_str(data, "identity")
-        batch_id = _optional_worker_str(data, "batch_id")
-        session_ids = _required_worker_str_list(data, "session_ids")
-        error = _optional_worker_str(data, "error")
-    except Exception as exc:
-        issue = f"update worker: state error: {type(exc).__name__}: {exc}"
-        return _WorkerSummary(state=f"worker: state error: {type(exc).__name__}: {exc}"), issue
-    if pid is None and status == "idle":
-        return _WorkerSummary(state="worker: idle"), None
-    if pid is None:
-        error = "ValueError: async update worker state must contain integer field: pid"
-        issue = f"update worker: state error: {error}"
-        return _WorkerSummary(state=f"worker: state error: {error}"), issue
-    if not process_exists(pid):
-        issue = f"update worker: stale pid {pid}"
-        return _WorkerSummary(state=f"worker: stale pid {pid}"), issue
-    if identity is not None and process_identity(pid) != identity:
-        issue = f"update worker: stale pid {pid}"
-        return _WorkerSummary(state=f"worker: stale pid {pid}"), issue
-    detail_parts = []
-    if batch_id:
-        detail_parts.append(f"batch: {batch_id}")
-    visible = ", ".join(session_ids)
-    if visible:
-        detail_parts.append(f"sessions: {visible}")
-    issue = None
-    if error:
-        error_preview = _cap_preview(error).splitlines()[0]
-        detail_parts.append(f"error: {error_preview}")
-        issue = f"update worker: {error_preview}"
-    state = f"worker: {status} pid {pid}"
-    return _WorkerSummary(state=state, detail="\n".join(detail_parts) if detail_parts else None), issue
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -991,16 +749,6 @@ def _sync_timestamp(value: object, field: str) -> tuple[datetime, str]:
     return parsed, value
 
 
-def _async_outcome_time(path: Path, state: object) -> str:
-    timestamp = getattr(state, "finished_at", None) or getattr(state, "started_at", None)
-    if isinstance(timestamp, str) and timestamp:
-        return timestamp
-    try:
-        return f"{path.stat().st_mtime_ns:020d}"
-    except OSError:
-        return ""
-
-
 def _read_insight_trigger_snapshot(memory_root: Path) -> _InsightTriggerSnapshot:
     path = Path(memory_root) / ".runtime" / "insight" / "trigger-state.json"
     if not path.exists():
@@ -1044,38 +792,6 @@ def _optional_insight_result_str(value: object, field: str) -> str | None:
         return None
     if value not in {"artifact", "noop"}:
         raise ValueError(f"{field} must be artifact, noop, or null")
-    return value
-
-
-def _required_worker_str(data: dict[str, Any], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"async update worker state must contain string field: {key}")
-    return value
-
-
-def _optional_worker_str(data: dict[str, Any], key: str) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError(f"async update worker state must contain string or null field: {key}")
-    return value
-
-
-def _optional_worker_int(data: dict[str, Any], key: str) -> int | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"async update worker state must contain integer or null field: {key}")
-    return value
-
-
-def _required_worker_str_list(data: dict[str, Any], key: str) -> list[str]:
-    value = data.get(key)
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ValueError(f"async update worker state must contain string list field: {key}")
     return value
 
 

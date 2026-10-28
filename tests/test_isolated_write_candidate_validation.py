@@ -7,8 +7,6 @@ from rightmemory.isolated_write import (
     IsolatedWriteSupervisor,
     MainMemoryDirtyError,
 )
-from rightmemory.update_queue import UpdateCandidate
-from rightmemory.update_record import UpdateRecord, UpdateRecordStore
 from tests.isolated_write_test_base import IsolatedWriteTestBase
 
 
@@ -26,28 +24,26 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
                 {"MEMORY_safe.md", "MEMORY_unsafe.md"},
             )
 
-    def test_update_model_cannot_author_a_candidate_record(self):
-        candidate = UpdateCandidate(
-            uid="a" * 32,
-            session_id="agent-session",
-            display_id=1,
-            message="runtime-owned evidence",
-            submitted_at="2026-07-27T12:00:00+00:00",
-        )
-        record = UpdateRecord.from_candidates((candidate,))
+    def test_writers_cannot_author_program_owned_learning_state(self):
+        for role in ("update", "guidance-curator", "skills-curator", "sync-reconciler"):
+            for relative in (
+                "learning/candidates/" + "a" * 64 + ".json",
+                "learning/processed/memory/" + "a" * 64 + ".json",
+                "learning/claims/memory.json",
+                "learning/withdrawn/" + "a" * 64 + ".json",
+            ):
+                with self.subTest(role=role, path=relative):
+                    def callback(worktree: Path) -> str:
+                        path = worktree / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text("{}\n", encoding="utf-8")
+                        self._git("add", "-f", relative, cwd=worktree)
+                        self._git("commit", "-m", "model-authored program state", cwd=worktree)
+                        return "updated"
 
-        def callback(worktree: Path) -> str:
-            path = UpdateRecordStore(worktree).write(record)
-            self._git("add", "-f", path.relative_to(worktree).as_posix(), cwd=worktree)
-            self._git("commit", "-m", "update: model-authored record", cwd=worktree)
-            return "updated"
-
-        with self.assertRaisesRegex(RuntimeError, "non-memory paths"):
-            IsolatedWriteSupervisor(self.root, "update").run(
-                callback,
-                operation_id=record.operation_id,
-                operation_input={"message": candidate.message},
-            )
+                    with self.assertRaisesRegex(RuntimeError, "non-memory paths"):
+                        IsolatedWriteSupervisor(self.root, role).run(callback)
+                    self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
 
     def test_non_memory_temp_commit_does_not_land(self):
         def callback(worktree: Path) -> None:

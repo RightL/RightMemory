@@ -3,14 +3,22 @@ name: maintain-rightmemory
 description: "Use when the user explicitly asks to inspect or maintain ordinary RightMemory context, including memory about the user and other people."
 ---
 
-- If the user specifies an exact root, use it. Otherwise run `rightmemory status` from the task's working directory, or `rightmemory --profile <name> status` when the user specifies a profile, and use the reported `root:`. If no root is reported, stop and ask the user; do not infer or guess it. Never call `rightmemory update`, submit candidates, or invoke another RightMemory model role.
-- Run `rightmemory validate --root <root>` before reading RightMemory state. Never follow or read a path it reports as non-regular; treat other findings as maintenance evidence.
-- Read the package-owned schema and shared Memory core with `rightmemory reference schema` and `rightmemory reference memory`, then read available regular `<root>/MEMORY.md`, relevant reachable backings, and relevant Git history or `update_records/*.json`. Read Pursuit as context for Memory meaning and references, not as content to reorganize. Read `rightmemory reference edit-correction` or `rightmemory reference shared-view` when those surfaces matter; never edit immutable update records. Inspect the requested scope for changes that would improve future understanding and use.
-- During cleanup, delete trivial items instead of compacting them.
-- Preserve consequential context gaps or ambiguity found within the requested scope as Open Context Questions; in read-only reviews, report them without editing.
-- An explicit request to change these surfaces authorizes the requested maintenance. Read-only inspection does not authorize edits. Resolve ordinary local details from the current state, and ask only when a missing target or materially different interpretation prevents a safe change; do not add a routine preview-and-approval ceremony.
-- Before writing, require the active root to be clean, capture its branch and HEAD, and create a dedicated temporary Git worktree and branch from that HEAD. Do not stash, discard, or absorb unrelated changes.
-- Apply the requested ordinary-context changes in the worktree to Memory and its relevant backings. Consult relevant RightMemory Edit Feedback after forming a tentative judgment. Agent guidance and correction cases belong to `maintain-agent-guidance`; reusable work experiences and skills belong to `maintain-work-skills`. Preserve existing Behavior/S# material unless the user requested a concrete ownership cleanup, and preserve affected references. Leave Pursuit unchanged; explicit map changes belong to `maintain-pursuit-map`.
-- Run `rightmemory validate --root <worktree>` and require a successful exit immediately before committing with subject `maintain: <concise maintenance summary>` and a `Validation:` body.
-- Before landing, require the active root to remain clean, on the captured branch, and at the captured HEAD; otherwise stop and report the changed state. Land the exact validated commit with `git merge --ff-only`, without creating another commit, then require `rightmemory validate --root <root>` to pass. Remove the temporary worktree and branch; push when sync is configured.
-- Report the applied changes, validation result, landed commit hash, and push result, or `no commit`.
+# Maintain Memory
+
+Use the shared Memory core to improve the requested context. This is the maintenance mode of the same curator that learns from ordinary submissions; it does not require another per-item approval round.
+
+Use the user's exact root or profile. Otherwise run `rightmemory status` from the task's working directory and use its reported root. If the root remains unknown, ask rather than guessing.
+
+For a read-only request, inspect relevant Memory and its references, using `rightmemory reference schema` and `rightmemory reference memory`, and report your findings without editing. For requested changes, prepare an isolated task:
+
+```bash
+rightmemory curate --root <active-root> begin --domain memory --mode maintain --scope "<requested scope>"
+```
+
+Read the returned `instructions_file` and work in its isolated `worktree` with native file tools. You may delegate that task to an available native agent. Check the returned mode and scope before editing. If another task is active, resolve it separately before preparing the requested maintenance. After interruption, confirm its worker has ended, inspect status, and resume the same task and worktree. Use the returned `retry_argv` when its edits must be abandoned or the base is stale.
+
+Improve future understanding of the user, other people, decisions, and circumstances within the requested scope. Remove trivial or misleading context rather than merely compacting it, and preserve consequential uncertainty or missing context. Agent guidance and correction cases belong to `maintain-agent-guidance`; work experiences and instruction bodies belong to `maintain-work-skills`. Preserve relevant graph references. Pursuit remains read-only; explicit map changes use `maintain-pursuit-map`.
+
+Validate and commit as the task directs, then use its returned completion command. The program's completion receipt confirms publication to the active root. If completion is interrupted, inspect the supplied status command and retry the same task instead of repeating the curation. Maintenance leaves pending candidates and their processing state to Update.
+
+Report the meaningful changes, remaining uncertainty, and actual publication result.

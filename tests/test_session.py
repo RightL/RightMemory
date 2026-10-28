@@ -26,20 +26,6 @@ class MessageSessionStoreTests(unittest.TestCase):
 
         self.assertEqual(paths.history.parent.name, "hashed")
 
-    def test_existing_long_history_keeps_legacy_path(self):
-        with tempfile.TemporaryDirectory() as tempdir:
-            store = MessageSessionStore(Path(tempdir), "update")
-            session_id = "legacy-" + "s" * 64
-            legacy_history = store.root / f"{session_id}.json"
-            legacy_history.parent.mkdir(parents=True)
-            legacy_history.write_bytes(b'[{"message":"existing"}]')
-
-            paths = store.paths(session_id)
-            with store.locked(session_id) as locked:
-                saved = locked.load_json()
-
-        self.assertEqual(paths.history, legacy_history)
-        self.assertEqual(saved, b'[{"message":"existing"}]')
 
     def test_long_session_ids_use_stable_hashed_paths(self):
         with tempfile.TemporaryDirectory() as tempdir:

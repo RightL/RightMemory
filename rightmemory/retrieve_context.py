@@ -17,7 +17,6 @@ from .session import _ensure_runtime_gitignore, _fsync_directory, _safe_session_
 SNAPSHOT_HEADER = "Daily RightMemory root snapshot"
 SNAPSHOT_SCOPE = "rightmemory-roots-v3"
 DIFF_HEADER = "RightMemory root changes since previous retrieve turn"
-RECENT_SUBMITTED_CONTEXT_HEADER = "Recent submitted RightMemory candidates"
 UPDATED_MATERIAL_HEADER = "Updated retrieval material"
 CURRENT_MATERIAL_HEADER = "Current retrieval material"
 QUERY_HEADER = "Query"
@@ -40,7 +39,6 @@ class RetrieveSessionState:
     session_id: str
     delivered_memory_commit: str | None = None
     model_history_json: bytes | None = field(default=None, repr=False)
-    visible_recent_candidates: dict[str, str] = field(default_factory=dict)
     delivery_coverage: RetrieveDeliveryCoverage = field(default_factory=RetrieveDeliveryCoverage)
 
 
@@ -60,7 +58,6 @@ class RetrieveContextStore:
             "session_id",
             "delivered_memory_commit",
             "model_history",
-            "visible_recent_candidates",
             "delivery_coverage",
         }
         unknown = set(data) - allowed
@@ -80,18 +77,11 @@ class RetrieveContextStore:
             if raw_history is None
             else json.dumps(raw_history, ensure_ascii=False, separators=(",", ":")).encode()
         )
-        raw_visible = data.get("visible_recent_candidates", {})
-        if not isinstance(raw_visible, dict) or any(
-            not isinstance(key, str) or not isinstance(value, str)
-            for key, value in raw_visible.items()
-        ):
-            raise ValueError("retrieve context visible_recent_candidates must be a string map")
         coverage = _coverage_from_dict(data.get("delivery_coverage", {}))
         return RetrieveSessionState(
             session_id=session_id,
             delivered_memory_commit=delivered,
             model_history_json=model_history_json,
-            visible_recent_candidates=dict(raw_visible),
             delivery_coverage=coverage,
         )
 
@@ -101,7 +91,6 @@ class RetrieveContextStore:
         *,
         memory_commit: str | None,
         model_history_json: bytes | None,
-        visible_recent_candidates: dict[str, str],
         delivery: RetrieveDeliveryCoverage | None = None,
     ) -> None:
         state = self.load(session_id)
@@ -109,7 +98,6 @@ class RetrieveContextStore:
             session_id=session_id,
             delivered_memory_commit=memory_commit,
             model_history_json=model_history_json,
-            visible_recent_candidates=dict(visible_recent_candidates),
             delivery_coverage=state.delivery_coverage.merged(delivery or RetrieveDeliveryCoverage()),
         )
         self._write(next_state)
@@ -131,7 +119,6 @@ class RetrieveContextStore:
             "session_id": state.session_id,
             "delivered_memory_commit": state.delivered_memory_commit,
             "model_history": _model_history_value(state.model_history_json),
-            "visible_recent_candidates": dict(state.visible_recent_candidates),
             "delivery_coverage": _coverage_to_dict(state.delivery_coverage),
         }
         _write_json(self.memory_root, self._state_path(state.session_id), data)
@@ -268,32 +255,6 @@ def format_query_block(query: str) -> str:
     return f"# {QUERY_HEADER}\n\n{query.strip()}"
 
 
-def format_recent_submitted_context_block(
-    entries: list[object],
-    *,
-    no_longer_pending: list[str] | tuple[str, ...] = (),
-) -> str:
-    if not entries and not no_longer_pending:
-        return ""
-    lines = [f"# {RECENT_SUBMITTED_CONTEXT_HEADER}", ""]
-    if entries:
-        if no_longer_pending:
-            lines.extend(["New pending:", ""])
-        for entry in entries:
-            lines.append(
-                f"[selection_id: {entry.update_session_id}:{entry.candidate_id} | "
-                f"update session: {entry.update_session_id} | "
-                f"candidate: {entry.candidate_id} | submitted_at: {entry.submitted_at}]"
-            )
-            lines.extend(entry.message.splitlines() or [""])
-            lines.append("")
-    if no_longer_pending:
-        lines.extend(["No longer pending:", ""])
-        lines.extend(f"- `{selection_id}`" for selection_id in no_longer_pending)
-        lines.append("")
-    return "\n".join(lines).rstrip()
-
-
 def format_updated_material_block(labels: list[str]) -> str:
     if not labels:
         return ""
@@ -401,7 +362,7 @@ def _coverage_from_dict(value: object) -> RetrieveDeliveryCoverage:
         return RetrieveDeliveryCoverage()
     if not isinstance(value, dict):
         raise ValueError("retrieve delivery_coverage must be an object")
-    allowed = {"local_items", "source_items", "complete_sources", "ranges", "recent_candidates"}
+    allowed = {"local_items", "source_items", "complete_sources", "ranges"}
     unknown = set(value) - allowed
     if unknown:
         raise ValueError(f"retrieve delivery_coverage has unknown field(s): {', '.join(sorted(unknown))}")
@@ -438,18 +399,11 @@ def _coverage_from_dict(value: object) -> RetrieveDeliveryCoverage:
             raise ValueError("retrieve delivery_coverage range entries are malformed")
         ranges.append(DeliveredRange(source_id, start, end, source_hash))
 
-    recent = value.get("recent_candidates", {})
-    if not isinstance(recent, dict) or any(
-        not isinstance(key, str) or not isinstance(item, str)
-        for key, item in recent.items()
-    ):
-        raise ValueError("retrieve delivery_coverage.recent_candidates must be a string map")
     return RetrieveDeliveryCoverage(
         local_items=string_map("local_items"),
         source_items=string_map("source_items"),
         complete_sources=string_map("complete_sources"),
         ranges=ranges,
-        recent_candidates=dict(recent),
     )
 
 
@@ -459,7 +413,6 @@ def _coverage_to_dict(coverage: RetrieveDeliveryCoverage) -> dict[str, object]:
         "source_items": dict(coverage.source_items),
         "complete_sources": dict(coverage.complete_sources),
         "ranges": [asdict(item) for item in coverage.ranges],
-        "recent_candidates": dict(coverage.recent_candidates),
     }
 
 
