@@ -283,19 +283,24 @@ else:
             runtime.assert_not_called()
             self.assertEqual(_snapshot(root), before)
 
-    def test_restart_uses_installed_python_for_stopped_worker_or_ready_candidates(self):
-        for was_running, ready in ((True, False), (False, True), (False, False)):
-            with self.subTest(was_running=was_running, ready=ready), tempfile.TemporaryDirectory() as tempdir:
+    def test_restart_uses_installed_python_for_stopped_ready_or_waiting_worker(self):
+        for was_running, ready, deadline in (
+            (True, False, None), (False, True, None), (False, False, None),
+            (False, False, "2030-01-01T00:00:00+00:00"),
+        ):
+            with self.subTest(was_running=was_running, ready=ready, deadline=deadline), tempfile.TemporaryDirectory() as tempdir:
                 root = Path(tempdir)
                 installer = self._existing_installer(root)
                 installer.runtime_python = root / "installed-python"
                 with (
-                    patch("rightmemory.learning_service.LearningService.notices", return_value=[{"domain": "memory", "ready": ready}]),
+                    patch("rightmemory.learning_service.LearningService.notices", return_value=[{
+                        "domain": "memory", "ready": ready, "next_ready_at": deadline,
+                    }]),
                     patch("rightmemory.curation_worker.CurationWorker.wake") as wake,
                     patch("builtins.print"),
                 ):
                     installer._restart_curation_worker(was_running)
-                if was_running or ready:
+                if was_running or ready or deadline:
                     wake.assert_called_once_with(python_executable=installer.runtime_python)
                 else:
                     wake.assert_not_called()

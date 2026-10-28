@@ -569,12 +569,35 @@ The runtime is intentionally small:
 
 ### Curation Execution and Recovery
 
-Configured submission wakes a single background worker. It processes bounded batches
-for Memory, guidance, and skills, continuing while work remains. There is no separate
-per-session quiet-period configuration. The native path returns readiness to the main
-assistant, which supplies the agents through the same task controls.
+Memory, guidance, and skills accumulate pending evidence independently. Their shared
+batch settings live in `rightmemory.toml`:
 
-`rightmemory curate status` reports pending evidence and active tasks. A task retains
+```toml
+[curation.batch]
+trigger_candidates = 15
+target_batch_candidates = 30
+max_wait_seconds = 86400
+```
+
+A domain becomes ready as soon as it has 15 pending candidates, including submissions
+from sessions that are still active. Below that threshold, each session has a one-hour
+quiet period from its latest pending submission. The oldest quiet session starts a
+batch after a further 24 hours, so small queues can make progress. A new submission
+resets its own session's quiet period; other sessions keep their deadlines.
+
+Each run takes the available eligible evidence up to the target of 30 candidates or
+24,000 evidence characters. The first candidate is admitted even when it exceeds the
+character limit. A session can span batches to keep those bounds. Remaining evidence
+stays pending and is evaluated against the same count and time triggers.
+
+Configured submission wakes a single background worker. It processes ready domains
+and waits for the next deadline without invoking a model. New submissions interrupt
+that wait, and installation can stop the waiting worker. The native path exposes the
+same readiness on tool calls for the main assistant to delegate; it does not run an
+unattended timer. `begin` and `run` respect batching, while maintenance and recovery of
+an existing task do not wait for new candidates.
+
+`rightmemory curate status` reports pending evidence, waiting deadlines, and active tasks. A task retains
 its candidate identities across retries. After an interrupted completion or lost reply,
 inspect the same task and retry `complete`; a prepared result can publish without
 repeating semantic work. `effects_pending` likewise calls for completion recovery,

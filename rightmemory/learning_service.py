@@ -13,6 +13,7 @@ from typing import Any
 from .assistant_write import AssistantStaleVersionError, AssistantWriteManager
 from .automatic_effects import replay_memory_operation_effects
 from .config import load_sync_config
+from .curation_batch import select_curation_batch
 from .isolated_write import WorktreeLease
 from .learning import (
     LEARNING_DOMAINS, LearningCandidate, LearningClaim, learning_claims,
@@ -266,9 +267,11 @@ class LearningService:
                     "status_argv": self._argv("status", "--task", effect_task["task_id"]),
                 })
             else:
+                batch = select_curation_batch(pending, self.coordinator.batch_config)
                 result.append({
-                    "domain": domain, "ready": bool(pending), "mode": "update", "scope": "",
-                    "status": "ready" if pending else "waiting", "candidate_count": len(pending),
+                    "domain": domain, "ready": bool(batch.candidates), "mode": "update", "scope": "",
+                    "status": "ready" if batch.candidates else "waiting", "candidate_count": len(pending),
+                    "next_ready_at": None if batch.next_ready_at is None else batch.next_ready_at.isoformat(),
                     "begin_argv": self._argv("begin", "--domain", domain),
                     "run_argv": self._argv("run", "--domain", domain),
                 })

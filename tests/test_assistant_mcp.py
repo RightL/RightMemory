@@ -132,6 +132,12 @@ class AssistantMcpTests(unittest.TestCase):
 
 class AssistantMcpStdioTests(IsolatedWriteTestBase):
     def test_entrypoint_stdio_handshake_and_model_free_core_calls(self):
+        (self.root / ".git/info").mkdir(exist_ok=True)
+        with (self.root / ".git/info/exclude").open("a", encoding="utf-8") as stream:
+            stream.write("\n/rightmemory.toml\n")
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.batch]\ntrigger_candidates = 1\n", encoding="utf-8",
+        )
         parameters = StdioServerParameters(
             command=sys.executable,
             args=[
