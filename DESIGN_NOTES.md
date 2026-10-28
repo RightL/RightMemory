@@ -20,6 +20,12 @@ starts from a bounded candidate batch. Maintain starts from existing material in
 requested scope and does not consume pending evidence. The program owns claims,
 processing records, withdrawal, and cleanup; models judge and edit curated content.
 
+Batch readiness and batch size serve separate purposes. Count and waiting-time
+triggers let related evidence accumulate and reduce repeated model work; size bounds
+limit each run. All domains and executors use the same readiness policy, checked again
+against synchronized evidence when acquiring a new claim. Recovery retains its existing
+evidence and proceeds without waiting for another batch to accumulate.
+
 ## Native and Configured Execution
 
 The shared service prepares isolated worktrees and publishes validated results for

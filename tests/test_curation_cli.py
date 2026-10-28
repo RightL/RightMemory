@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.curation_cli import main, submit_main
-from rightmemory.learning import list_learning_candidates
+from rightmemory.learning import learning_claims, list_learning_candidates
 from rightmemory.learning_retrieval import learning_sources
 from tests.isolated_write_test_base import IsolatedWriteTestBase
 
@@ -20,6 +20,12 @@ class CurationCliTests(IsolatedWriteTestBase):
         return status, json.loads(output.getvalue())
 
     def test_single_submission_and_three_no_change_domains_retire_source(self):
+        (self.root / ".git/info").mkdir(exist_ok=True)
+        with (self.root / ".git/info/exclude").open("a", encoding="utf-8") as stream:
+            stream.write("\n/rightmemory.toml\n")
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.batch]\ntrigger_candidates = 1\n", encoding="utf-8",
+        )
         args = ["--executor", "native", "--session", "s", "--request-id", "r", "Unsettled but useful case."]
         code, saved = self.invoke(args, submit=True)
         self.assertEqual(code, 0)
@@ -40,6 +46,23 @@ class CurationCliTests(IsolatedWriteTestBase):
         _, repeated = self.invoke(args, submit=True)
         self.assertFalse(repeated["created"])
         self.assertNotIn(source_id, learning_sources(self.root))
+
+    def test_default_single_submission_waits_without_starting_curation(self):
+        code, saved = self.invoke(
+            ["--executor", "native", "--session", "s", "One pending observation."], submit=True,
+        )
+        self.assertEqual(code, 0)
+        for notice in saved["curation"]:
+            self.assertFalse(notice["ready"])
+            self.assertEqual(notice["candidate_count"], 1)
+            self.assertIsNotNone(notice["next_ready_at"])
+        captured = self._git("rev-parse", "HEAD")
+        with patch("rightmemory.learning_coordinator.LearningCoordinator._worktree", side_effect=AssertionError("worktree created")):
+            code, waiting = self.invoke(["begin", "--domain", "memory"])
+        self.assertEqual(code, 0)
+        self.assertEqual(waiting["status"], "not_ready")
+        self.assertEqual(learning_claims(self.root), ())
+        self.assertEqual(self._git("rev-parse", "HEAD"), captured)
 
     def test_configured_wake_failure_reports_saved_candidate(self):
         with patch("rightmemory.curation_worker.CurationWorker.wake", side_effect=OSError("cannot spawn")):

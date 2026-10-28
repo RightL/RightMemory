@@ -12,9 +12,11 @@ from unittest.mock import patch
 from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
 from rightmemory.config import (
     AgentCliConfig,
+    CurationBatchConfig,
     PrunerConfig,
     RuntimeConfig,
     load_config,
+    load_curation_batch_config,
     load_insight_watch_config,
     load_pruner_config,
     load_sync_config,
@@ -40,6 +42,46 @@ from rightmemory.sync import SyncResult
 EMPTY_RETRIEVE_SELECTION_JSON = '{"ids": [], "sources": []}'
 
 class ConfigTests(unittest.TestCase):
+    def test_curation_batch_defaults_and_overrides(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self.assertEqual(load_curation_batch_config(root), CurationBatchConfig(memory_root=root))
+            (root / "rightmemory.toml").write_text(
+                "[curation.batch]\ntrigger_candidates=3\ntarget_batch_candidates=8\nmax_wait_seconds=60\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(load_curation_batch_config(root), CurationBatchConfig(root, 3, 8, 60))
+
+    def test_curation_batch_rejects_invalid_tables_and_fields(self):
+        invalid = [
+            'curation="invalid"', '[curation]\nbatch=1', '[curation]\nunknown=1',
+            '[curation.batch]\nunknown=1',
+            '[curation.batch]\ntrigger_candidates=31\ntarget_batch_candidates=30',
+        ]
+        for field in ("trigger_candidates", "target_batch_candidates", "max_wait_seconds"):
+            for value in ("0", "-1", "true", "1.5", '\"15\"'):
+                invalid.append(f"[curation.batch]\n{field}={value}")
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            for content in invalid:
+                with self.subTest(content=content):
+                    (root / "rightmemory.toml").write_text(content, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        load_curation_batch_config(root)
+
+    def test_role_and_other_config_loaders_accept_curation_batch_table(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            (root / "rightmemory.toml").write_text(
+                '[agent_cli]\nprovider="codex"\n[curation.batch]\ntrigger_candidates=15\n',
+                encoding="utf-8",
+            )
+            for role in ("update", "retrieve", "guidance-curator", "skills-curator"):
+                self.assertEqual(load_config(role, root).role, role)
+            load_sync_config(root)
+            load_pruner_config(root)
+            load_insight_watch_config(root)
+
     def test_retired_subsystem_config_is_rejected_without_rewriting(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

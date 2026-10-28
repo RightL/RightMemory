@@ -8,7 +8,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import SyncConfig
+from .config import SyncConfig, load_curation_batch_config
+from .curation_batch import select_curation_batch
 from .git_storage import git, git_result, require_repository_root
 from .isolated_write import IsolatedWriteSupervisor
 from .learning import (
@@ -70,6 +71,7 @@ class LearningCoordinator:
     def __init__(self, config: SyncConfig, holder_id: str | None = None):
         self.config = config
         self.memory_root = Path(config.memory_root).expanduser().resolve()
+        self.batch_config = load_curation_batch_config(self.memory_root)
         self.root = self.memory_root / ".runtime" / "learning"
         self._holder_id = holder_id
         if holder_id is not None:
@@ -108,6 +110,13 @@ class LearningCoordinator:
         with self._locked():
             holder = self._ensure_holder()
             self._synchronize()
+            if mode == "update" and replace_token is None and self.current_claim(domain) is None:
+                pending = list_learning_candidates(self.memory_root, domain=domain)
+                if not select_curation_batch(pending, self.batch_config).candidates:
+                    return ClaimResult(reason=(
+                        "batch is waiting for more candidates or its maximum wait"
+                        if pending else "no pending candidates"
+                    ))
             for _attempt in range(_PUSH_ATTEMPTS):
                 base, upstream = self._base()
                 with self._worktree(base) as worktree:
@@ -126,10 +135,20 @@ class LearningCoordinator:
                         identifiers = existing.candidate_ids
                         remove_learning_claim(worktree, existing)
                     else:
+                        batch = select_curation_batch(tuple(pending.values()), self.batch_config) if mode == "update" else None
+                        if batch is not None and not batch.candidates:
+                            return ClaimResult(reason=(
+                                "batch is waiting for more candidates or its maximum wait"
+                                if pending else "no pending candidates"
+                            ))
                         identifiers = (
-                            (() if mode == "maintain" else _select_candidates(tuple(pending.values())))
+                            (() if batch is None else tuple(item.candidate_id for item in batch.candidates))
                             if candidate_ids is None else tuple(candidate_ids)
                         )
+                        if batch is not None and not set(identifiers).issubset(
+                            item.candidate_id for item in batch.candidates
+                        ):
+                            raise LearningClaimLost("selected evidence is not ready in this domain batch")
                     if mode == "maintain":
                         if identifiers:
                             raise ValueError("maintenance does not claim candidate evidence")
@@ -410,14 +429,3 @@ def _require_commit(value: str) -> None:
 def _require_domain(value: str) -> None:
     if value not in LEARNING_DOMAINS:
         raise ValueError("unknown curation domain")
-
-
-def _select_candidates(candidates: tuple[LearningCandidate, ...]) -> tuple[str, ...]:
-    selected: list[str] = []
-    size = 0
-    for candidate in candidates:
-        if selected and (len(selected) >= 20 or size + len(candidate.evidence) > 24_000):
-            break
-        selected.append(candidate.candidate_id)
-        size += len(candidate.evidence)
-    return tuple(selected)

@@ -147,13 +147,12 @@ class Installer:
         from .curation_worker import CurationWorker
         from .learning_service import LearningService
 
-        if not worker_was_running and not any(
-            notice.get("ready") for notice in LearningService(self.memory_root).notices()
-        ):
+        worker = CurationWorker(self.memory_root)
+        if not worker_was_running and not worker.has_work(LearningService(self.memory_root).notices()):
             return
         if self.runtime_python is None:
             raise InstallError("installed RightMemory runtime is unavailable for the curation worker")
-        CurationWorker(self.memory_root).wake(python_executable=self.runtime_python)
+        worker.wake(python_executable=self.runtime_python)
         print("  [start]   curation worker on the installed runtime")
 
     def _print_layout(self) -> None:
