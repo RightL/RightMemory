@@ -56,7 +56,7 @@ def create_mcp_server(
     def validate() -> CallToolResult:
         return _invoke(lambda: validate_memory_root(root).to_dict())
 
-    register_curation_tools(server, root, native=True, backend=curation_backend)
+    register_curation_tools(server, root, backend=curation_backend)
     return server
 
 

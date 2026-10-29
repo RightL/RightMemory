@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import json
+import shlex
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -15,8 +15,8 @@ from pydantic import Field
 
 from .config import load_config
 from .codex_sdk import CodexSdkRunner
+from .curation_mcp import SUBMIT_DESCRIPTION
 from .debug import DebugTrace
-from .curation_mcp import CurationBackend, register_curation_tools
 from .runtime import RightMemoryRuntime
 
 
@@ -37,9 +37,6 @@ Use relevant returned context in the work, but treat the current conversation an
 evidence as authoritative. Skip clearly self-contained requests for which stored context
 is unlikely to matter.
 
-Candidate submission starts the configured curation worker. Inspect returned curation
-notices when recovery is needed; continue the user's work while it runs.
-
 If returned context is stale, wrong, misleading, or overbroad, do not follow it; submit
 the correction and current evidence through rightmemory_submit."""
 
@@ -51,6 +48,8 @@ _MAX_ERROR_DETAIL_CHARS = 400
 
 class McpBackend(Protocol):
     def retrieve(self, session_id: str, need: str) -> str: ...
+
+    def submit(self, session_id: str, evidence: str, request_id: str | None = None) -> str | None: ...
 
     def actionable_warning(self) -> str | None: ...
 
@@ -100,6 +99,35 @@ class DefaultMcpBackend:
                 if timing is not None:
                     timing.runtime_cleanup_ms = _elapsed_ms(cleanup_started)
 
+    def submit(self, session_id: str, evidence: str, request_id: str | None = None) -> str | None:
+        from .learning_service import LearningService
+
+        result = LearningService(self.memory_root).submit(
+            session_id, evidence, request_id, executor="configured",
+        )
+        warnings = []
+        sync = result["sync"]
+        if sync["status"] not in {"pushed", "disabled"}:
+            detail = _brief_detail(sync.get("error") or sync.get("message") or sync["status"])
+            warnings.append(f"Synchronization did not finish: {detail}. Inspect `rightmemory status`.")
+        worker = result["worker"]
+        if worker["status"] not in {"started", "running"}:
+            detail = _brief_detail(worker.get("error") or worker.get("reason") or worker["status"])
+            warnings.append(
+                f"The curation worker did not start: {detail}. "
+                f"Inspect {_worker_status_command(self.memory_root)}."
+            )
+        curation = result.get("curation")
+        if isinstance(curation, dict) and curation.get("error"):
+            warnings.append(f"Curation status could not be inspected: {_brief_detail(curation['error'])}.")
+        if result["status"] == "withdrawn":
+            receipt = "This submission was previously withdrawn; this retry did not queue it."
+        elif warnings:
+            receipt = "RightMemory saved the evidence."
+        else:
+            return None
+        return " ".join([receipt, *warnings, "Do not resubmit the evidence."])
+
     def actionable_warning(self) -> str | None:
         return _actionable_curation_warning(self.memory_root)
 
@@ -141,7 +169,6 @@ def create_mcp_server(
     memory_root: Path,
     *,
     backend: McpBackend | None = None,
-    curation_backend: CurationBackend | None = None,
 ) -> MCPServer:
     if backend is None:
         selected_backend = DefaultMcpBackend(
@@ -184,7 +211,22 @@ def create_mcp_server(
         output = selected_backend.retrieve(clean_session, clean_need)
         return _result(output, selected_backend.actionable_warning())
 
-    register_curation_tools(server, memory_root, native=False, backend=curation_backend)
+    @server.tool(
+        name="rightmemory_submit",
+        description=SUBMIT_DESCRIPTION + (
+            "\n\nProcessing runs in the background. An empty successful result confirms capture; "
+            "continue without waiting or polling. Only actionable failures or recovery warnings are returned."
+        ),
+        structured_output=False,
+    )
+    def rightmemory_submit(
+        session_id: SessionId, evidence: str, request_id: str | None = None,
+    ) -> CallToolResult:
+        warning = selected_backend.submit(_clean_session_id(session_id), evidence, request_id)
+        recovery = selected_backend.actionable_warning()
+        if recovery:
+            recovery = f"The submission was recorded; do not resubmit it. {recovery}"
+        return _result(warning, recovery)
 
     return server
 
@@ -208,22 +250,18 @@ def _actionable_curation_warning(memory_root: Path) -> str | None:
     try:
         state = CurationWorker(memory_root).status()
         if state.get("error"):
-            return f"RightMemory curation needs recovery: {state['error']}. Inspect `rightmemory curate status`."
+            return (
+                f"RightMemory curation reported a failure: {_brief_detail(state['error'])}. "
+                f"Inspect {_worker_status_command(memory_root)}."
+            )
     except (OSError, ValueError, RuntimeError) as exc:
         return f"RightMemory could not inspect curation state: {_error_detail(exc)}"
     return None
 
 
-def _curation_notice(memory_root: Path) -> str | None:
-    from .learning_service import LearningService
-
-    try:
-        notices = LearningService(memory_root).notices()
-    except (OSError, ValueError, RuntimeError) as exc:
-        return f"RightMemory could not inspect curation readiness: {_error_detail(exc)}"
-    if any(item["status"] != "waiting" for item in notices):
-        return json.dumps({"curation": notices}, ensure_ascii=False)
-    return None
+def _worker_status_command(memory_root: Path) -> str:
+    command = shlex.join(["rightmemory", "curate", "--root", str(memory_root), "worker", "status"])
+    return f"`{command}`"
 
 
 def _timed_default_retrieve_result(
@@ -248,7 +286,7 @@ def _timed_default_retrieve_result(
 
         result_started = time.perf_counter()
         try:
-            result = _result(output, warning, _curation_notice(backend.memory_root))
+            result = _result(output, warning)
         finally:
             timing.result_construction_ms = _elapsed_ms(result_started)
         outcome = "success"
@@ -286,10 +324,14 @@ def _clean_text(value: str, label: str) -> str:
 
 def _error_detail(exc: Exception) -> str:
     raw = str(exc).strip()
-    detail = raw.splitlines()[0] if raw else type(exc).__name__
+    return f"{type(exc).__name__}: {_brief_detail(raw or type(exc).__name__)}"
+
+
+def _brief_detail(value: str) -> str:
+    detail = value.strip().splitlines()[0] if value.strip() else "unknown error"
     if len(detail) > _MAX_ERROR_DETAIL_CHARS:
         detail = detail[:_MAX_ERROR_DETAIL_CHARS] + "...[truncated]"
-    return f"{type(exc).__name__}: {detail}"
+    return detail
 
 
 def _elapsed_ms(started: float) -> float:
