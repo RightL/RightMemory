@@ -93,7 +93,7 @@ rightmemory doctor agent-cli
 
 Before using the internal runtime, configure its role backend in `<memory-root>/rightmemory.toml` (by default `~/.rightmemory/rightmemory.toml`). See [Standalone Config](#standalone-config) for model endpoints and credentials, or [CLI-Agent Config](#cli-agent-config) for Codex SDK / Claude Code CLI execution. The `rightmemory mcp` transport connects your host agent to this runtime; it does not replace the configured backend or use the host's model automatically. Native assistant execution instead uses `rightmemory assistant`, including its optional `assistant mcp` transport.
 
-For the internal runtime's MCP transport, follow [MCP setup](docs/MCP.md) to register `rightmemory mcp` as a local stdio server. Connect the server in your host and check its retrieval, Memory submission, and shared learning tools, including `rightmemory_retrieve` and the unified `rightmemory_submit`. Tool discovery does not verify backend execution or a completed update. Do not also load a RightMemory orchestrator skill in that MCP conversation; command-only clients use the CLI skills instead.
+For the internal runtime's MCP transport, follow [MCP setup](docs/MCP.md) to register `rightmemory mcp` as a local stdio server. It exposes two tools: `rightmemory_retrieve` and the unified `rightmemory_submit`. Successful submission returns empty success; retrieval returns context and actionable warnings without routine curation notices. Use the CLI for curation inspection, maintenance, recovery, and withdrawal. Tool discovery does not verify backend execution or a completed update. Do not also load a RightMemory orchestrator skill in that MCP conversation; command-only clients use the CLI skills instead.
 
 After connecting MCP, add a short instruction to your agent guidance file, such as
 `AGENTS.md` for Codex or `CLAUDE.md` for Claude Code:
@@ -124,7 +124,7 @@ rightmemory watch start
 
 A typical conversation asks a new agent to continue work or repeat a familiar task. The daily entry retrieves relevant Memory, guidance, experiences, skills, and raw evidence, then applies them to the current request.
 
-At a natural boundary, the daily entry submits useful evidence once. The same interaction can improve ordinary context, guidance, and work skills independently. A configured worker processes ready domains automatically; native execution delegates them through the current assistant. A submission receipt confirms capture, and a completion receipt confirms publication. Fully processed raw candidates leave current retrieval, while useful retained material remains.
+At a natural boundary, the daily entry submits useful evidence once. The same interaction can improve ordinary context, guidance, and work skills independently. A configured worker processes ready domains automatically; native execution delegates them through the current assistant. An accepted submission confirms capture; curation completion confirms publication. Ordinary MCP keeps successful capture quiet, while the CLI provides inspection and recovery. Fully processed raw candidates leave current retrieval, while useful retained material remains.
 
 The user can later request broader maintenance through the corresponding domain skill. The Pursuit map remains under human control. See [docs/DEMO.md](docs/DEMO.md) for a recording script.
 
@@ -565,7 +565,7 @@ The runtime is intentionally small:
 - Shared submission persists a candidate once, and each domain records its own processing. Pending candidates are ordinary `L#` retrieval sources. Fully processed evidence is removed by program finalization.
 - Domain curation, Insight, and Pruner use isolated Git worktrees. Runtime validates complete role-owned results before landing them.
 - Standalone daemon context is preserved with Pydantic AI message history.
-- The local [MCP stdio adapter](docs/MCP.md) exposes the same runtime, shared candidate store, and curation lifecycle as the CLI.
+- The local [MCP stdio adapter](docs/MCP.md) exposes retrieval and submission through the same runtime and shared candidate store as the CLI. Native assistant MCP also exposes model-free curation controls for worker coordination; manual configured execution uses `rightmemory curate run`.
 
 ### Curation Execution and Recovery
 

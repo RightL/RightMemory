@@ -42,13 +42,15 @@ For a named profile, use `"args": ["--profile", "my-project", "mcp"]`.
 
 `rightmemory_retrieve` retrieves context that could materially affect the work, including relevant pending evidence and complete skills. `rightmemory_submit` records useful evidence once for Memory, guidance, and skills. The submitting agent does not need to choose its final lesson or destination.
 
-Shared control tools are `rightmemory_begin_curation`, `rightmemory_complete_curation`, `rightmemory_curation_status`, and `rightmemory_withdraw_candidate`. Internal MCP also exposes `rightmemory_run_curation` for the configured executor. Native assistant MCP uses the same model-free controls and lets the current assistant delegate native agents.
+These are the two tools exposed by ordinary `rightmemory mcp`. Curation runs through the configured worker; inspection, maintenance, recovery, and withdrawal use the CLI.
 
 Tool and parameter descriptions carry the ordinary-agent contract. An internal MCP client need not load the command-backed daily skill as well; native assistant MCP keeps the shared `rightmemory-assistant` skill for delegation.
 
 Capture favors useful evidence before demanding a settled general rule. Preserve scope and uncertainty, and capture distinct later occurrences when they add evidence. Pending candidates participate in relevant retrieval. When all three domains finish, the program removes their raw sources; useful cases or experiences remain where the curators retained them.
 
-Configured submission wakes the curation worker. Native responses include readiness and active-task notices for the main assistant. A submission receipt confirms capture, and a completion receipt confirms publication. After interruption, inspect the same task and retry its completion. A notice with `effects_pending` requires completion recovery without another model turn.
+Configured submission wakes the curation worker. Successful ordinary submission returns empty success without candidate identifiers or routine curation state. Retrieval returns relevant context and actionable warnings, without routine curation notices. Failures and partial success that require attention remain visible. Acceptance of a submission confirms capture; publication can be inspected through the CLI.
+
+Native assistant MCP also exposes `rightmemory_begin_curation`, `rightmemory_complete_curation`, `rightmemory_curation_status`, and `rightmemory_withdraw_candidate`. Its responses retain readiness and active-task notices so the main assistant can delegate native agents. After interruption, inspect the same task and retry its completion. A notice with `effects_pending` requires completion recovery without another model turn. Neither MCP transport exposes `rightmemory_run_curation`; configured manual execution uses `rightmemory curate run`.
 
 ## Scope
 

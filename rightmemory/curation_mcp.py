@@ -14,7 +14,6 @@ class CurationBackend(Protocol):
     def begin(self, domain: str, *, mode: str = "update", scope: str = "", retry_task: str | None = None) -> dict[str, Any]: ...
     def complete(self, task_id: str, output: str = "") -> dict[str, Any]: ...
     def status(self, task_id: str | None = None) -> dict[str, Any]: ...
-    def run(self, domain: str, *, mode: str = "update", scope: str = "") -> dict[str, Any]: ...
     def withdraw(self, candidate_id: str) -> dict[str, Any]: ...
 
 
@@ -38,13 +37,11 @@ Pursuit edits use the separate maintain-pursuit-map workflow."""
 
 
 def register_curation_tools(
-    server: MCPServer, memory_root: Path, *, native: bool, backend: CurationBackend | None = None,
+    server: MCPServer, memory_root: Path, *, backend: CurationBackend | None = None,
 ) -> None:
     ready_guidance = (
         "Relay ready curation notices to the main assistant for native delegation through the assistant skill. "
         "Inspect an active task before resuming or retrying it."
-        if native else
-        "Submission wakes the configured worker. Continue the user's work; inspect curation status if recovery is needed."
     )
 
     def selected() -> CurationBackend:
@@ -55,7 +52,7 @@ def register_curation_tools(
 
     @server.tool(name="rightmemory_submit", description=SUBMIT_DESCRIPTION + "\n\n" + ready_guidance, structured_output=False)
     def submit(session_id: str, evidence: str, request_id: str | None = None) -> CallToolResult:
-        return _invoke(lambda: selected().submit(session_id, evidence, request_id, executor="native" if native else "configured"))
+        return _invoke(lambda: selected().submit(session_id, evidence, request_id, executor="native"))
 
     @server.tool(name="rightmemory_begin_curation", description="Prepare an isolated domain task. Update processes pending evidence; Maintain improves existing state in a selected scope. Retry only after the previous worker has stopped.", structured_output=False)
     def begin(domain: Literal["memory", "guidance", "skills"], mode: Literal["update", "maintain"] = "update", scope: str = "", retry_task: str | None = None) -> CallToolResult:
@@ -72,11 +69,6 @@ def register_curation_tools(
     @server.tool(name="rightmemory_withdraw_candidate", description="Withdraw a pending candidate by identity. This prevents further processing; it does not undo already published domain conclusions.", structured_output=False)
     def withdraw(candidate_id: str) -> CallToolResult:
         return _invoke(lambda: selected().withdraw(candidate_id))
-
-    if not native:
-        @server.tool(name="rightmemory_run_curation", description="Run a ready or resumable domain task with the configured executor. Use mode=maintain with a scope to maintain existing state.", structured_output=False)
-        def run(domain: Literal["memory", "guidance", "skills"], mode: Literal["update", "maintain"] = "update", scope: str = "") -> CallToolResult:
-            return _invoke(lambda: selected().run(domain, mode=mode, scope=scope))
 
 
 def _invoke(operation: Callable[[], dict[str, Any]]) -> CallToolResult:
