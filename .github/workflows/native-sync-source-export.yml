@@ -1,0 +1,31 @@
+name: Native sync repair source export
+
+on:
+  push:
+    branches:
+      - work/native-sync-export-20261101
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export Git objects only
+        shell: bash
+        run: |
+          git bundle create "$RUNNER_TEMP/rightmemory-source.bundle" --all
+          git bundle verify "$RUNNER_TEMP/rightmemory-source.bundle"
+      - name: Upload source bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: rightmemory-source-bundle
+          path: ${{ runner.temp }}/rightmemory-source.bundle
+          retention-days: 1
+          compression-level: 0
