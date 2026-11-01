@@ -1,0 +1,29 @@
+name: Native sync repair test dependencies
+
+on:
+  push:
+    branches:
+      - work/native-sync-export-20261101
+    paths:
+      - .github/workflows/native-sync-test-dependencies.yml
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Download declared test dependencies for offline verification
+        shell: bash
+        run: |
+          python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/wheels" 'mcp>=2,<3' 'pydantic-ai-slim[anthropic,openai]>=1.0.0' 'fastapi>=0.115.0' 'uvicorn>=0.30.0' hatchling 'openai-codex==0.162.1'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rightmemory-test-dependencies
+          path: ${{ runner.temp }}/wheels
+          retention-days: 1
+          compression-level: 0
