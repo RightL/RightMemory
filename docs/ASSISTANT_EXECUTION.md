@@ -83,7 +83,22 @@ rightmemory assistant --root /absolute/memory-root sync pull
 rightmemory assistant --root /absolute/memory-root sync push
 ```
 
-An incoming conflict or invalid merged state returns sync status and available file/operation details, and blocks a new Update. Resolve the reported conflict using the existing sync repair workflow, then retry ordinary sync before preparing another Update. Sync conflicts are not delegated to a native repair agent by this interface.
+An incoming semantic conflict or invalid merged state returns a `sync_repair` notice and blocks new Update work. A Retrieve subagent relays the notice to the main agent, which prepares and delegates one native repair:
+
+```bash
+rightmemory assistant --root /absolute/memory-root sync-repair begin
+rightmemory assistant --root /absolute/memory-root sync-repair status --task TASK
+rightmemory assistant --root /absolute/memory-root sync-repair validate --task TASK
+rightmemory assistant --root /absolute/memory-root sync-repair complete --task TASK
+```
+
+`begin` returns `claimed`, `task_id`, `instructions_file`, and a candidate `worktree` containing the staged merge. Repeated preparation returns the active task without a new claim. The native subagent reads the canonical Sync Reconciler instructions, uses its own file/Git tools, validates and commits, then calls the returned completion command bound to the active root. `validate` applies sync validation, including retaining Edit Feedback overflow for later maintenance.
+
+The program owns validation and exact fast-forward admission. The active root remains unchanged until completion; program-owned coordination records are not semantic edit input. Ordinary sync and configured repair do not take over an active native task. No process, model credential, or long-held lock is required while the host edits.
+
+After interruption, inspect and resume the same task. A prepared result retries completion without another semantic turn, including when publication succeeded but its reply was lost. When the local base became stale or the host deliberately abandons the edit, stop the previous worker and use `sync-repair begin --retry TASK`. Replacement fences the old task and reports its retained unpublished worktree. Remote advancement alone does not discard a completed local merge: completion continues normal synchronization and reports `applied`, `landed_commit`, and `sync` separately. Further semantic conflicts produce another notice.
+
+This handoff repairs staged incoming semantic state. Pre-existing dirty active files, invalid coordination records, inaccessible roots, and transport failures remain explicit blocking diagnostics rather than instructions for an agent to rewrite program-owned state.
 
 The optional MCP transport wraps the same assistant core:
 

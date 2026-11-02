@@ -1058,6 +1058,9 @@ def _input_metadata(value: dict[str, Any]) -> dict[str, Any]:
             "merge_conflicted",
             "repair_input_sha256",
             "policy_sha256",
+            "executor",
+            "repair_diagnostic",
+            "protected_input_sha256",
         )
         return {key: value[key] for key in keys if key in value}
     keys = ("role", "session_id", "kind")
