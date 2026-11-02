@@ -1366,7 +1366,7 @@ class RightMemoryRuntime:
         self._finish_sync_repair(result)
         if result.status == SYNC_DIRTY_STATUS:
             return result
-        if result.status == "conflict":
+        if result.status in {"conflict", "repair_required"}:
             raise RuntimeError(result.message)
         return None
 

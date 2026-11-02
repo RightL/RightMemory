@@ -27,6 +27,10 @@ class AssistantBackend(Protocol):
 
     def sync(self, action: str = "refresh") -> dict[str, Any]: ...
 
+    def sync_repair(
+        self, action: str, task_id: str | None = None, retry_task: str | None = None,
+    ) -> dict[str, Any]: ...
+
 
 def create_mcp_server(
     memory_root: Path, *, backend: AssistantBackend | None = None
@@ -87,6 +91,18 @@ def create_mcp_server(
     )
     def sync(action: Literal["refresh", "pull", "push"] = "refresh") -> CallToolResult:
         return _invoke(lambda: selected.sync(action))
+
+    @server.tool(
+        name="rightmemory_assistant_sync_repair",
+        description=("Prepare, inspect, validate, or complete a native sync repair task. "
+                     "The host delegates newly claimed work; completion alone admits it."),
+        structured_output=False,
+    )
+    def sync_repair(
+        action: Literal["begin", "status", "validate", "complete"],
+        task_id: str | None = None, retry_task: str | None = None,
+    ) -> CallToolResult:
+        return _invoke(lambda: selected.sync_repair(action, task_id, retry_task))
 
     @server.tool(
         name="rightmemory_assistant_validate",

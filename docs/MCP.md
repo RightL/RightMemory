@@ -59,3 +59,5 @@ The MCP adapter calls the same runtime, async Update store, and guidance capture
 Ordinary MCP work does not create, rename, reorganize, focus, or remove Pursuits. Explicit map requests use the human editor or the independent `maintain-pursuit-map` skill; no additional MCP map-write tools are provided.
 
 This command currently serves stdio only. RightMemory does not expose a Streamable HTTP MCP endpoint.
+
+The assistant transport also exposes `rightmemory_assistant_sync_repair` with `begin`, `status`, `validate`, and `complete` actions over the same model-free repair service. Native repair notices are relayed to the host main agent for delegation; see [Assistant Execution](ASSISTANT_EXECUTION.md#sync-and-mcp).

@@ -81,6 +81,7 @@ class SyncResult:
     message: str
     files: list[str] = field(default_factory=list)
     operation_id: str | None = None
+    repairable: bool = False
 
     def context_block(self) -> str:
         files = ", ".join(self.files) if self.files else "none"
@@ -163,6 +164,17 @@ class _CandidateInspection:
     merge_conflicted: bool
 
 
+@dataclass(frozen=True)
+class _PreparedRepair:
+    record: SemanticOperationRecord
+    candidate: _Candidate
+    diagnostic: SyncResult
+
+
+class SyncRepairStaleError(RuntimeError):
+    """The active root moved before a prepared sync repair could land."""
+
+
 class SyncManager:
     def __init__(self, config: SyncConfig):
         self.config = config
@@ -170,6 +182,26 @@ class SyncManager:
         self.state_path = self.memory_root / ".runtime" / "sync" / "state.json"
         self.state_lock_path = self.state_path.with_name("state.lock")
         self.cycle_lock_path = self.state_path.with_name("cycle.lock")
+
+    def native_repair_record(self) -> SemanticOperationRecord | None:
+        records = [
+            record for record in SemanticOperationStore(self.memory_root).list_outstanding_records()
+            if record.input_data.get("kind") == "sync-repair"
+            and record.input_data.get("executor") == "native" and record.phase not in FINAL_PHASES
+        ]
+        if len(records) > 1:
+            raise RuntimeError("multiple native sync repairs require recovery")
+        return records[0] if records else None
+
+    def native_repair_pending(self) -> SyncResult | None:
+        record = self.native_repair_record()
+        if record is None:
+            return None
+        diagnostic = record.input_data["repair_diagnostic"]
+        return SyncResult(
+            "repair_required", "native sync repair is active; resume its existing task",
+            diagnostic["files"], record.operation_id, repairable=True,
+        )
 
     def pull(self, repair: SyncRepair | None = None) -> SyncResult:
         if not self.config.enabled:
@@ -273,6 +305,9 @@ class SyncManager:
         if upstream_commit is None:
             return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
 
+        pending = self.native_repair_pending()
+        if pending is not None:
+            return pending
         captured = self._capture_valid_tip(upstream_commit)
         if isinstance(captured, SyncResult):
             return self._record_failure(captured)
@@ -332,6 +367,9 @@ class SyncManager:
         upstream_commit = self._resolve_commit(upstream)
         if upstream_commit is None:
             return self._record_failure(SyncResult("error", "sync failed: upstream commit is unavailable"))
+        pending = self.native_repair_pending()
+        if pending is not None:
+            return pending
         captured = self._capture_valid_tip(upstream_commit)
         if (
             isinstance(captured, SyncResult)
@@ -378,9 +416,53 @@ class SyncManager:
         repair: SyncRepair | None,
         store: SemanticOperationStore,
     ) -> SyncResult:
+        pending = self.native_repair_pending()
+        if pending is not None:
+            return pending
         recovered = self._recover_prepared_sync(store)
         if recovered is not None:
             return recovered
+        prepared = self._prepare_incoming_repair(
+            upstream_commit, store, executor="configured" if repair is not None else None,
+        )
+        if isinstance(prepared, SyncResult):
+            return prepared
+        record, candidate = prepared.record, prepared.candidate
+        retain_candidate = True
+        try:
+            if record.phase == "prepared":
+                result = self._publish_prepared(store, record, candidate)
+                retain_candidate = False
+                return result
+
+            result = self._run_or_adopt_repair(
+                store,
+                record,
+                candidate,
+                prepared.diagnostic,
+                repair,
+            )
+            retain_candidate = result.status == "error"
+            return result
+        except Exception as exc:
+            latest = store.read(record.operation_id)
+            if latest is not None and latest.phase == "running":
+                store.record_failure(record.operation_id, f"{type(exc).__name__}: {exc}")
+            raise
+        finally:
+            if retain_candidate:
+                candidate.lease.release()
+            else:
+                self._remove_candidate(candidate)
+
+    def _prepare_incoming_repair(
+        self, upstream_commit: str, store: SemanticOperationStore, *, executor: str | None,
+    ) -> SyncResult | _PreparedRepair:
+        """Stage and record a bounded repair, without deciding who executes it.
+
+        Caller holds execution and memory locks, and releases the returned
+        candidate's process lease when returning control to a native host.
+        """
         blocked = self._active_preflight()
         if blocked is not None:
             return blocked
@@ -415,12 +497,13 @@ class SyncManager:
                 candidate_commit = self._required_head(candidate.path)
                 self._publish_candidate(candidate_commit, start_commit, candidate)
                 return SyncResult("synced", "validated incoming memory published")
-            if repair is None:
+            if executor is None:
                 return SyncResult(
                     "conflict",
                     f"incoming memory could not be admitted: {inspection.repair.message}; "
                     "active memory was left unchanged",
                     inspection.repair.files,
+                    repairable=True,
                 )
 
             repair_input_sha256 = _sha256_json(
@@ -438,6 +521,7 @@ class SyncManager:
                     "upstream_commit": upstream_commit,
                     "repair_input_sha256": repair_input_sha256,
                     "policy_sha256": policy_sha256,
+                    **({"native_attempt": uuid.uuid4().hex} if executor == "native" else {}),
                 }
             )
             operation_id = f"sync-repair-{operation_digest}"
@@ -455,7 +539,7 @@ class SyncManager:
                 "merge_conflicted": inspection.merge_conflicted,
                 "repair_input_sha256": repair_input_sha256,
                 "policy_sha256": policy_sha256,
-                # The full diagnostic binds operation identity but is not retained in the receipt.
+                **({"executor": "native"} if executor == "native" else {}),
                 "repair_diagnostic": {
                     "status": inspection.repair.status,
                     "message": inspection.repair.message,
@@ -500,6 +584,8 @@ class SyncManager:
             input_data["expected_merge_parent"] = final_inspection.expected_merge_parent
             input_data["merge_conflicted"] = final_inspection.merge_conflicted
 
+        if executor == "native":
+            input_data["protected_input_sha256"] = self._repair_control_sha256(candidate.path)
         record = store.begin(operation_id, input_data)
         if record.phase in FINAL_PHASES:
             if candidate is not None:
@@ -513,38 +599,14 @@ class SyncManager:
                 upstream_commit,
                 repair_input_sha256,
             )
-        retain_candidate = True
-        try:
-            if record.phase == "prepared":
-                result = self._publish_prepared(store, record, candidate)
-                retain_candidate = False
-                return result
-
-            result = self._run_or_adopt_repair(
-                store,
-                record,
-                candidate,
-                inspection.repair,
-                repair,
-            )
-            retain_candidate = result.status == "error"
-            return result
-        except Exception as exc:
-            latest = store.read(operation_id)
-            if latest is not None and latest.phase == "running":
-                store.record_failure(operation_id, f"{type(exc).__name__}: {exc}")
-            raise
-        finally:
-            if retain_candidate:
-                candidate.lease.release()
-            else:
-                self._remove_candidate(candidate)
+        return _PreparedRepair(record, candidate, inspection.repair)
 
     def _recover_prepared_sync(self, store: SemanticOperationStore) -> SyncResult | None:
         records = [
             record
             for record in store.list_outstanding_records()
             if record.phase == "prepared" and record.input_data.get("kind") == "sync-repair"
+            and record.input_data.get("executor") != "native"
         ]
         records.sort(
             key=lambda record: (
@@ -553,32 +615,37 @@ class SyncManager:
             )
         )
         for record in records:
-            claimed = store.claim_prepared(record.operation_id)
-            outcome = claimed.outcome
-            if outcome is None:
-                raise RuntimeError("prepared sync operation has no outcome")
-            candidate_commit = outcome.metadata.get("candidate_commit")
-            if not isinstance(candidate_commit, str) or not candidate_commit:
-                # Prepared no-change is completed without touching active history.
-                self._cleanup_recorded_candidate(claimed, require_removed=True)
-                store.complete_no_change(claimed.operation_id, outcome.start_commit)
-                return self._result_from_record(store.read(claimed.operation_id) or claimed)
-            current_head = self._required_head(self.memory_root)
-            if self._is_ancestor(candidate_commit, current_head):
-                self._cleanup_recorded_candidate(claimed, require_removed=True)
-                store.complete_commit(claimed.operation_id, candidate_commit)
-                return self._result_from_record(store.read(claimed.operation_id) or claimed)
-            if current_head != outcome.start_commit:
-                raise RuntimeError("active HEAD changed incompatibly with a prepared sync candidate")
-            candidate = self._open_recorded_candidate(claimed)
-            try:
-                result = self._publish_prepared(store, claimed, candidate)
-            except Exception:
-                candidate.lease.release()
-                raise
-            self._remove_candidate(candidate)
-            return result
+            return self._recover_repair(store, record)
         return None
+
+    def _recover_repair(self, store: SemanticOperationStore, record: SemanticOperationRecord) -> SyncResult:
+        claimed = store.claim_prepared(record.operation_id)
+        outcome = claimed.outcome
+        if outcome is None:
+            raise RuntimeError("prepared sync operation has no outcome")
+        candidate_commit = outcome.metadata.get("candidate_commit")
+        if not isinstance(candidate_commit, str) or not candidate_commit:
+            # Prepared no-change is completed without touching active history.
+            self._cleanup_recorded_candidate(claimed, require_removed=True)
+            store.complete_no_change(claimed.operation_id, outcome.start_commit)
+            return self._result_from_record(store.read(claimed.operation_id) or claimed)
+        self._check_native_candidate_frozen(record, candidate_commit)
+        current_head = self._required_head(self.memory_root)
+        if self._is_ancestor(candidate_commit, current_head):
+            self._cleanup_recorded_candidate(claimed, require_removed=True)
+            store.complete_commit(claimed.operation_id, candidate_commit)
+            return self._result_from_record(store.read(claimed.operation_id) or claimed)
+        if current_head != outcome.start_commit:
+            raise SyncRepairStaleError("active HEAD changed incompatibly with a prepared sync candidate")
+        candidate = self._open_recorded_candidate(claimed)
+        try:
+            result = self._publish_prepared(store, claimed, candidate)
+        except Exception:
+            candidate.lease.release()
+            raise
+        self._remove_candidate(candidate)
+        return result
+
 
     def _run_or_adopt_repair(
         self,
@@ -608,6 +675,15 @@ class SyncManager:
                 ),
             )
 
+        return self._finish_repair(store, record, candidate, diagnostic, effects=effects)
+
+    def _finish_repair(
+        self, store: SemanticOperationStore, record: SemanticOperationRecord,
+        candidate: _Candidate, diagnostic: SyncResult, *, effects: tuple[OperationEffect, ...] = (),
+    ) -> SyncResult:
+        """Admit a completed candidate; shared by configured and native execution."""
+        pre_tip = _required_record_string(record, "pre_repair_tip")
+        current_tip = self._required_head(candidate.path)
         if current_tip == pre_tip:
             conflict = SyncResult(
                 "conflict",
@@ -660,6 +736,16 @@ class SyncManager:
             raise RuntimeError("sync repair operation disappeared after preparation")
         return self._publish_prepared(store, prepared, candidate)
 
+    def _check_native_candidate_frozen(self, record: SemanticOperationRecord, commit: str) -> None:
+        if record.input_data.get("executor") != "native":
+            return
+        branch, path, _lease = self._recorded_candidate_identity(record)
+        if not path.exists():
+            return
+        if (self._resolve_commit(branch) != commit or self._required_head(path) != commit
+                or self._git_stdout(path, "status", "--porcelain", "--untracked-files=all")):
+            raise RuntimeError("native repair worktree changed after completion; retained for review")
+
     def _publish_prepared(
         self,
         store: SemanticOperationStore,
@@ -672,13 +758,14 @@ class SyncManager:
         candidate_commit = outcome.metadata.get("candidate_commit")
         if not isinstance(candidate_commit, str) or not candidate_commit:
             raise RuntimeError("prepared sync operation has no candidate commit")
+        self._check_native_candidate_frozen(record, candidate_commit)
         current_head = self._required_head(self.memory_root)
         if self._is_ancestor(candidate_commit, current_head):
             self._remove_candidate(candidate, require_removed=True)
             store.complete_commit(record.operation_id, candidate_commit)
             return self._result_from_record(store.read(record.operation_id) or record)
         if current_head != outcome.start_commit:
-            raise RuntimeError("active HEAD changed before prepared sync candidate could publish")
+            raise SyncRepairStaleError("active HEAD changed before prepared sync candidate could publish")
 
         branch_commit = self._resolve_commit(candidate.branch)
         if branch_commit != candidate_commit:
@@ -696,7 +783,7 @@ class SyncManager:
 
     def _publish_candidate(self, candidate_commit: str, start_commit: str, candidate: _Candidate) -> None:
         if self._required_head(self.memory_root) != start_commit:
-            raise RuntimeError("active HEAD changed before sync publication")
+            raise SyncRepairStaleError("active HEAD changed before sync publication")
         blocked = self._active_preflight()
         if blocked is not None:
             raise RuntimeError(blocked.message)
@@ -845,6 +932,17 @@ class SyncManager:
         result = self._run_git(root, "show", f":{stage}:{GUIDANCE_INBOX_PATH}")
         return result.stdout if result.returncode == 0 else GUIDANCE_INBOX_HEADING + "\n"
 
+    def _repair_control_sha256(self, root: Path) -> str:
+        paths = self._git_stdout(root, "ls-files", "-z").split("\0")
+        protected = sorted({
+            path for path in paths if path and (
+                _is_update_queue_path(path) or _is_update_record_path(path) or path == GUIDANCE_INBOX_PATH
+            )
+        })
+        return _sha256_json([
+            (path, hashlib.sha256((root / path).read_bytes()).hexdigest()) for path in protected
+        ])
+
     def _validate_repair_commit(
         self,
         record: SemanticOperationRecord,
@@ -872,6 +970,10 @@ class SyncManager:
         status = self._git_stdout(candidate.path, "status", "--porcelain")
         if status:
             raise RuntimeError("sync repair candidate has uncommitted changes")
+        if record.input_data.get("executor") == "native" and (
+            self._repair_control_sha256(candidate.path) != record.input_data["protected_input_sha256"]
+        ):
+            raise RuntimeError("sync repair changed program-owned coordination state")
         invalid = self._validate_candidate(
             candidate.path,
             _required_record_string(record, "active_start_commit"),
@@ -1314,6 +1416,7 @@ class SyncManager:
             state["last_status"] = result.status
             state["last_message"] = result.message
             state["last_files"] = result.files
+            state["last_repairable"] = result.repairable
             state.pop("last_failure_at", None)
             state.pop("last_failure_status", None)
             state.pop("last_failure_message", None)
@@ -1327,6 +1430,7 @@ class SyncManager:
             state["last_status"] = result.status
             state["last_message"] = result.message
             state["last_files"] = result.files
+            state["last_repairable"] = result.repairable
             state["last_failure_at"] = datetime.now(UTC).isoformat()
             state["last_failure_status"] = result.status
             state["last_failure_message"] = result.message

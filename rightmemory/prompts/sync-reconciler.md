@@ -33,7 +33,7 @@ The caller message supplies the repair context for this turn. It may include dir
 - Keep edits focused on the dirty or conflicted memory content and any nearby structure needed for coherence.
 - Use meaningful headings and specific edge types from the schema. Avoid duplicate ids, duplicate edges, dangling edges, self-edges, and edges that repeat simple heading containment.
 - Before finishing, run complete RightMemory validation with the available tool. During sync repair, validate RightMemory Edit Feedback structure without enforcing that file's semantic capacity ceiling.
-- After complete RightMemory state validates, commit the repaired state. In a staged candidate, stop after that commit: do not publish, push, abort, reset, or modify another checkout. Runtime alone validates and fast-forwards the active root to the exact candidate commit.
+- After complete RightMemory state validates, commit the repaired state. In a staged candidate, return the committed result to the caller; when supplied a native completion command, use it to hand the result back to program finalization. Do not directly publish, push, abort, reset, or modify another checkout. Runtime alone validates and fast-forwards the active root to the exact candidate commit.
 
 ## Final Reply
 
