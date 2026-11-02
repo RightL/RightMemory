@@ -31,7 +31,11 @@ def _output(operation) -> int:
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result.get("ok", True) else 1
     except (ValueError, OSError, RuntimeError, UnicodeError) as exc:
-        print(json.dumps({"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}}, ensure_ascii=False))
+        from .learning_coordinator import LearningUnavailable
+
+        details = exc.details if isinstance(exc, LearningUnavailable) else {}
+        print(json.dumps({"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)},
+                          **details}, ensure_ascii=False))
         return 1
 
 

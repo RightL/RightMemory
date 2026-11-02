@@ -5,7 +5,7 @@ import re
 import os
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .config import SyncConfig, load_curation_batch_config
@@ -33,6 +33,10 @@ _PUSH_ATTEMPTS = 4
 
 class LearningUnavailable(RuntimeError):
     """The authoritative state could not be reached or published safely."""
+
+    def __init__(self, message: str, *, details: dict | None = None):
+        super().__init__(message)
+        self.details = details or {}
 
 
 class LearningClaimLost(RuntimeError):
@@ -291,7 +295,12 @@ class LearningCoordinator:
         if self.config.enabled:
             result = SyncManager(self.config).push()
             if result.status != "pushed":
-                raise LearningUnavailable(f"candidate synchronization required: {result.message}")
+                from .native_sync import NativeSyncRepair
+
+                raise LearningUnavailable(
+                    f"candidate synchronization required: {result.message}",
+                    details={"sync": asdict(result), "sync_repair": NativeSyncRepair(self.memory_root).notice()},
+                )
         blocked = SyncManager(self.config)._active_preflight()
         if blocked is not None:
             raise LearningUnavailable(blocked.message)

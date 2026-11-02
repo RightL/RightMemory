@@ -546,7 +546,10 @@ class LearningService:
         return self._response(prepared)
 
     def _response(self, result: dict) -> dict:
+        from .native_sync import NativeSyncRepair
+
         response = {"ok": True, "active_root": str(self.memory_root), **result}
+        response["sync_repair"] = NativeSyncRepair(self.memory_root).notice()
         try:
             response["curation"] = self.notices()
         except (OSError, ValueError, RuntimeError) as exc:

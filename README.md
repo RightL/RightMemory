@@ -1027,3 +1027,7 @@ See [DESIGN_NOTES.md](DESIGN_NOTES.md) for the Pursuit map's ownership and stora
 Copyright 2026 RightL.
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+
+### Native synchronization repair
+
+Assistant execution can hand incoming semantic sync conflicts to the host's own subagent. Normal responses carry `sync_repair` notices; the main agent prepares a task, delegates its isolated worktree, and the child returns through program completion. Native repair shares the configured sync path's validation and exact publication boundary, while task identity survives separate CLI/MCP calls. Local application and remote push are reported independently. See [Assistant Execution](docs/ASSISTANT_EXECUTION.md#sync-and-mcp) for the controls and recovery flow.

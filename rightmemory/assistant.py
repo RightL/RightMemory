@@ -35,5 +35,28 @@ class AssistantService:
             raise ValueError("sync action must be refresh, pull, or push")
         return self._response({"sync": asdict(result)})
 
+    def sync_repair(
+        self, action: str, task_id: str | None = None, retry_task: str | None = None,
+    ) -> dict[str, Any]:
+        from .native_sync import NativeSyncRepair
+
+        repair = NativeSyncRepair(self.memory_root)
+        if retry_task is not None and action != "begin":
+            raise ValueError("retry_task is only valid for repair begin")
+        if task_id is not None and action == "begin":
+            raise ValueError("repair begin uses retry_task, not task_id")
+        if action == "begin":
+            result = repair.begin(retry_task)
+        elif action == "status":
+            result = repair.status(task_id)
+        elif action in {"validate", "complete"} and task_id is not None:
+            result = repair.validate(task_id) if action == "validate" else repair.complete(task_id)
+        else:
+            raise ValueError("repair requires begin, status, or validate/complete with a task id")
+        return self._response(result)
+
     def _response(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": True, **payload, "curation": LearningService(self.memory_root).notices()}
+        from .native_sync import NativeSyncRepair
+
+        return {"ok": True, **payload, "curation": LearningService(self.memory_root).notices(),
+                "sync_repair": NativeSyncRepair(self.memory_root).notice()}
