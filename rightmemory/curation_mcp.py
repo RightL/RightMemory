@@ -75,7 +75,10 @@ def _invoke(operation: Callable[[], dict[str, Any]]) -> CallToolResult:
     try:
         result = operation()
     except (ValueError, OSError, RuntimeError) as exc:
-        result = {"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}}
+        from .learning_coordinator import LearningUnavailable
+
+        details = exc.details if isinstance(exc, LearningUnavailable) else {}
+        result = {"ok": False, "error": {"type": type(exc).__name__, "message": str(exc)}, **details}
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
         structured_content=result, is_error=result.get("ok") is False,
