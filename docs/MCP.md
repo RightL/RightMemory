@@ -59,3 +59,5 @@ The adapters use the same candidate store, domain cores, and curation lifecycle 
 Ordinary curation leaves the user's Pursuit map unchanged. Explicit map requests use the human editor or `maintain-pursuit-map`; no additional MCP map-write tools are provided.
 
 This command currently serves stdio only. RightMemory does not expose a Streamable HTTP MCP endpoint.
+
+The assistant transport also exposes `rightmemory_assistant_sync_repair` with `begin`, `status`, `validate`, and `complete` actions over the same model-free repair service. Native repair notices are relayed to the host main agent for delegation; see [Assistant Execution](ASSISTANT_EXECUTION.md#sync-and-mcp).

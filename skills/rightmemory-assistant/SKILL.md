@@ -62,3 +62,11 @@ Only the program's completion receipt confirms that candidate work reached the a
 Use `begin --domain <domain> --retry <task-id>` when a task must be reconciled anew. After confirming the prior worker has stopped, this can also explicitly take over its claim from another checkout. Replacement fences the old publication and does not carry over unpublished edits. It is not the recovery action for an uncertain completion response.
 
 Report an inaccessible directory or unsupported native delegation as an assistant limitation. Do not substitute another agent product or claim adaptation from MCP tool discovery alone.
+
+## Recover Synchronization
+
+Normal responses may include a `sync_repair` notice. A child agent relays it to the main agent alongside its result. The main agent uses `begin_argv` and delegates a newly claimed repair with its `instructions_file` and `worktree` to one native subagent. The repair uses the canonical Sync Reconciler role and returns through the supplied completion command; it needs no configured model client.
+
+An active repair is existing work, including after its preparation command exits. Resume its worker or inspect `status_argv` after interruption instead of starting a duplicate. A prepared result uses `complete_argv` without repeating semantic edits. Explicit `retry_argv` replaces stale or abandoned work after the prior worker has stopped, fences the old task, and retains its unpublished worktree for inspection.
+
+Repair completion reports local application separately from remote synchronization. A failed push does not undo the local repair. Continue the blocked operation after recovery; retrieval can use the existing valid local sources while incoming state remains blocked.
