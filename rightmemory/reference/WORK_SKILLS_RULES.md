@@ -10,7 +10,7 @@ This core governs both candidate updates and requested maintenance. The task det
 
 ## Judgment
 
-Consider whether the work is likely to recur, whether a short future request could invoke it, and whether the retained material would help reproduce a meaningful result. A transcript summary or list of commands may omit the decisions the user still had to supply.
+Consider whether similar work is likely to recur and what the experience adds beyond what a capable agent can already do correctly from a short request and readily available project context. Preserve what it would otherwise miss or get wrong, with enough context to apply the lesson. Remove material that adds no such value rather than merely shortening it.
 
 Preserve the conditions that explain why a method worked, the checks that distinguish an acceptable result, and the reusable scripts or examples that avoid rebuilding it. Link project-owned resources when that keeps their authoritative version clear; include assets when the skill needs a durable, self-contained resource.
 
