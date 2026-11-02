@@ -44,6 +44,9 @@ class FakeBackend:
     def sync(self, action="refresh"):
         return self._record("sync", action)
 
+    def sync_repair(self, action, task_id=None, retry_task=None):
+        return self._record("sync_repair", action, task_id, retry_task)
+
 
 async def _call(server, name, arguments):
     async with Client(server, raise_exceptions=True) as client:
@@ -68,6 +71,12 @@ class AssistantMcpTests(unittest.TestCase):
         self.root = Path("/unused-assistant-root").resolve()
         self.server = create_mcp_server(self.root, backend=self.backend)
 
+    def test_sync_repair_routes_to_same_backend(self):
+        call(self.server, "rightmemory_assistant_sync_repair", {
+            "action": "complete", "task_id": "task-1",
+        })
+        self.assertEqual(self.backend.calls[-1], ("sync_repair", "complete", "task-1", None))
+
     def test_exposes_the_assistant_operations(self):
         self.assertEqual(
             {tool.name for tool in asyncio.run(_list(self.server))},
@@ -78,6 +87,7 @@ class AssistantMcpTests(unittest.TestCase):
                 "rightmemory_assistant_complete_update",
                 "rightmemory_assistant_update_status",
                 "rightmemory_assistant_sync",
+                "rightmemory_assistant_sync_repair",
                 "rightmemory_assistant_validate",
             },
         )
@@ -178,7 +188,7 @@ class AssistantMcpStdioTests(IsolatedWriteTestBase):
                     initialized = await client.initialize()
                     self.assertEqual(initialized.server_info.name, "RightMemory Assistant")
                     listed = await client.list_tools()
-                    self.assertEqual(len(listed.tools), 7)
+                    self.assertEqual(len(listed.tools), 8)
 
                     result = await client.call_tool(
                         "rightmemory_assistant_context", {"session_id": "stdio-session"}

@@ -36,6 +36,13 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
         status.add_argument("--task")
         sync = commands.add_parser("sync")
         sync.add_argument("action", choices=("refresh", "pull", "push"), nargs="?", default="refresh")
+        repair = commands.add_parser("sync-repair", help="prepare or complete host-owned sync repair")
+        repairs = repair.add_subparsers(dest="repair_action", required=True)
+        repair_begin = repairs.add_parser("begin")
+        repair_begin.add_argument("--retry", metavar="TASK")
+        for action in ("complete", "validate", "status"):
+            operation = repairs.add_parser(action)
+            operation.add_argument("--task", required=action != "status")
         commands.add_parser("validate", help="validate the bound root independently")
         mcp = commands.add_parser("mcp", help="run the thin native-assistant MCP server")
         mcp.add_argument("--transport", choices=("stdio",), default="stdio")
@@ -59,6 +66,10 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
                 result = service.context(args.session)
             elif args.command == "submit":
                 result = service.submit(args.session, args.request_id, args.file.read_text(encoding="utf-8"))
+            elif args.command == "sync-repair":
+                result = service.sync_repair(
+                    args.repair_action, getattr(args, "task", None), getattr(args, "retry", None),
+                )
             elif args.command == "sync":
                 result = service.sync(args.action)
             elif args.action == "begin":
