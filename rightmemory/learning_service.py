@@ -285,7 +285,12 @@ class LearningService:
     def run(self, domain: str, *, mode: str = "update", scope: str = "") -> dict[str, Any]:
         """Run one shared task with the configured domain executor."""
         _validate_domain(domain)
-        if self._active(domain) is None and self.coordinator.current_claim(domain) is None:
+        active = self._active(domain)
+        if active is not None and self._is_finalized(active):
+            # Finish a recovered publication as this call's task. The worker must
+            # observe its completion before it starts another batch's retry budget.
+            return self.complete(active["task_id"])
+        if active is None and self.coordinator.current_claim(domain) is None:
             pending = self._pending_effect_task(domain)
             if pending is not None:
                 completed = self.complete(pending["task_id"])
