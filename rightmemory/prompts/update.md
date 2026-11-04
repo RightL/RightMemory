@@ -20,6 +20,7 @@ Apply the shared Memory core to the supplied task. Update reconciles candidate e
 - Form a tentative keep, merge, skip, and edit judgment first.
 - Then read root `corrections.md` when present and use relevant RightMemory Edit Feedback as a late check on the tentative edit.
 - Prefer revising, merging, moving, narrowing, or removing existing state over appending near-duplicates.
+- When deleting project detail, check whether it also carries a relevant user choice whose loss could revive rejected behavior. Keep that choice compactly in its project scope; leave the implementation detail to project artifacts.
 - Make the smallest coherent change that leaves the whole affected state clear and valid. Structural changes are appropriate when they materially improve the tree or graph.
 - Shared-view content is external context. Store only local consequences that independently pass the relevant module rules.
 - Do not add schema explanations or maintenance commentary to semantic state.
