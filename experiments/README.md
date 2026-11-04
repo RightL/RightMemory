@@ -56,6 +56,25 @@ python experiments/retrieval_filter_latency.py \
 
 The output path must be new and ignored by Git. Evidence files are `latency-baseline.json`, `latency-diagnostic.json`, `latency-http.json`, `latency-websocket-control.json`, `latency-http-shared.json` (failed cleanup experiment), `latency-chat-reuse.json`, and `latency-reuse-carryover.json`, with adjacent event journals. `reuse-carryover-cases.json` contains only the fictional probe records. Syntax and local fake-client checks covered output collection, client/thread reuse, deferred release, failure cleanup, and warning-reader shutdown. Production code was unchanged, so the full runtime test suite was not rerun for these experiments.
 
+### Inherited filter context
+
+The original filter passed an empty `mcp_servers` table, which Codex recursively merged with the user's configuration. A live effective-config check still found all three configured MCP servers enabled. The correction reads server names through the existing connection and explicitly disables each one for the ephemeral thread. It also disables supported optional context, delegation, and optional tools. A live status check found all three servers disabled with zero tools and resources; their inventory entries still existed.
+
+[retrieval_filter_context.py](retrieval_filter_context.py) sends a fictional query to an anonymous loopback HTTP sink that returns an intentional error without forwarding the request or invoking a model. The report records sizes, tool names, and whether an authentication header was present, without saving headers or instruction text. This inspects request construction, not exact server-side context. The sink alone uses a loopback proxy exclusion; production transport and proxy settings are unchanged.
+
+Compared with the installed implementation at `a56a755`, the corrected request shrank from 40,953 to 25,948 bytes. Both requests had an empty top-level tools list, but tool definitions also appeared inside input items. The correction removed delegation tools and instructions, permissions and environment context, and the synchronous user-input tool. The final request still contained the 8,420-character global AGENTS.md block and host definitions for `exec`, `wait`, asynchronous user input, and sleep. These retained blocks prevent claiming a fully isolated text-only request. No supported per-thread switch to omit home user instructions was established.
+
+Four subsequent model calls compared `a56a755` with the final correction, alternating pair order and replaying the same full candidate payloads. Both used GPT-6 Luna/low, fresh ephemeral conversations, the existing login, and normal transport. The earlier runner was loaded from that Git revision in memory and selected through the latency harness's runner boundary; it used the same timing observer and response collector.
+
+| Query topic | Before input tokens | After input tokens | Before seconds | After seconds |
+| --- | ---: | ---: | ---: | ---: |
+| Plugin recommendations | 16,950 | 14,164 | 20.80 | 18.81 |
+| Viewer diagnosis | 25,924 | 23,134 | 19.13 | 18.28 |
+
+The measured reduction is about 2,790 input tokens per request. This pair of samples does not establish a stable latency improvement: output lengths differed, the corrected viewer call reported 3,456 cached input tokens, and the first baseline call spent 3.65 seconds opening its thread versus roughly 0.35–0.44 seconds for the others. All four still emitted WebSocket retry events `2/5` through `5/5`. Full candidate inputs, output instructions, model, effort, and production transport were unchanged.
+
+Private evidence is in `isolation-mcp-inventory.json`, `isolation-installed-envelope.json`, `isolation-final-envelope.json`, and `isolation-final-timing.json` with its event journal. Earlier diagnostic reports include opening excerpts and remain private. The full suite ran 1,512 tests with 33 skips; four failures and two errors matched the verified base failures exactly. All 76 focused filter, CLI, and fork lifecycle tests passed after the final delegation settings were added. Syntax and whitespace checks passed.
+
 ## Integrated embedding retrieval — 2026-09-29
 
 The optional runtime backend uses Nemotron 3 Embed 1B and Jina reranker v3.5, with forty candidates and at most ten returned entries. The Windows client owns the canonical source index and incremental vector cache; the models run on L20 GPU 1 through a private SSH tunnel. The configured host is a service address, not a hard-coded server dependency.

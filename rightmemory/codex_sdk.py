@@ -30,6 +30,7 @@ class _CodexSdkBindings:
     invalid_request_error: type[Exception]
     reasoning_effort: Any
     thread_unsubscribe_response: Any
+    config_read_response: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,20 +208,7 @@ class CodexSdkRunner:
                             "ephemeral": True,
                             "base_instructions": ephemeral_instructions,
                             "developer_instructions": "",
-                            "config": {
-                                "project_doc_max_bytes": 0,
-                                "skills": {"include_instructions": False},
-                                "web_search": "disabled",
-                                "features": {
-                                    "shell_tool": False,
-                                    "view_image": False,
-                                    "apps": False,
-                                    "plugins": False,
-                                    "multi_agent": False,
-                                    "memories": False,
-                                    "hooks": False,
-                                },
-                            },
+                            "config": _ephemeral_text_config(codex, cwd, sdk),
                         }
                     thread = codex.thread_start(
                         approval_mode=sdk.approval_mode.deny_all,
@@ -429,7 +417,7 @@ def _load_codex_sdk() -> _CodexSdkBindings:
     try:
         from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox, TransportClosedError
         from openai_codex.errors import InvalidRequestError
-        from openai_codex.generated.v2_all import ThreadUnsubscribeResponse
+        from openai_codex.generated.v2_all import ConfigReadResponse, ThreadUnsubscribeResponse
         from openai_codex.types import ReasoningEffort
     except ImportError as exc:
         raise RuntimeError(_CODEX_SDK_INSTALL_ERROR) from exc
@@ -442,7 +430,48 @@ def _load_codex_sdk() -> _CodexSdkBindings:
         invalid_request_error=InvalidRequestError,
         reasoning_effort=ReasoningEffort,
         thread_unsubscribe_response=ThreadUnsubscribeResponse,
+        config_read_response=ConfigReadResponse,
     )
+
+
+def _ephemeral_text_config(codex: Any, cwd: Path, sdk: _CodexSdkBindings) -> dict[str, Any]:
+    # Config tables merge recursively: an empty mcp_servers table does not remove
+    # inherited servers. Discover their names without logging their configuration.
+    response = codex._client.request(
+        "config/read",
+        {"cwd": str(cwd), "includeLayers": False},
+        response_model=sdk.config_read_response,
+    )
+    extras = response.config.model_extra or {}
+    servers = extras.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError("Codex config/read returned an invalid MCP server map")
+    return {
+        "mcp_servers": {name: {"enabled": False} for name in servers},
+        "project_doc_max_bytes": 0,
+        "skills": {"include_instructions": False},
+        "agents": {"enabled": False},
+        "web_search": "disabled",
+        "include_permissions_instructions": False,
+        "include_apps_instructions": False,
+        "include_collaboration_mode_instructions": False,
+        "include_environment_context": False,
+        "include_environment_context_time": False,
+        "tools": {
+            "experimental_request_user_input": {"enabled": False},
+            "update_plan": {"enabled": False},
+        },
+        "features": {
+            "shell_tool": False,
+            "view_image": False,
+            "apps": False,
+            "plugins": False,
+            "multi_agent": False,
+            "multi_agent_v2": False,
+            "memories": False,
+            "hooks": False,
+        },
+    }
 
 
 def _unsubscribe_thread(codex: Any, thread_id: str, sdk: _CodexSdkBindings) -> None:
