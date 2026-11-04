@@ -129,6 +129,30 @@ class CodexSdkRunner:
             on_timing=on_timing,
         )
 
+    def run_ephemeral_text_turn(
+        self,
+        *,
+        prompt: str,
+        instructions: str,
+        cwd: Path,
+        model: str | None,
+        reasoning_effort: str | None,
+        on_timing: Callable[[CodexSdkTiming], None] | None = None,
+    ) -> CodexSdkRunResult:
+        """Run supplied text in a fresh, nonpersistent conversation without workspace context."""
+        return self._run_turn(
+            prompt=prompt,
+            provider_session_id=None,
+            source_provider_session_id=None,
+            cwd=cwd,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            sandbox="read-only",
+            on_thread_started=None,
+            on_timing=on_timing,
+            ephemeral_instructions=instructions,
+        )
+
     def _run_turn(
         self,
         *,
@@ -141,6 +165,7 @@ class CodexSdkRunner:
         sandbox: str,
         on_thread_started: Callable[[str], None] | None,
         on_timing: Callable[[CodexSdkTiming], None] | None,
+        ephemeral_instructions: str | None = None,
     ) -> CodexSdkRunResult:
         sdk = _load_codex_sdk()
         started_at = self._clock()
@@ -176,11 +201,33 @@ class CodexSdkRunner:
                         sandbox=sdk_sandbox,
                     )
                 elif provider_session_id is None:
+                    thread_options: dict[str, Any] = {}
+                    if ephemeral_instructions is not None:
+                        thread_options = {
+                            "ephemeral": True,
+                            "base_instructions": ephemeral_instructions,
+                            "developer_instructions": "",
+                            "config": {
+                                "project_doc_max_bytes": 0,
+                                "skills": {"include_instructions": False},
+                                "web_search": "disabled",
+                                "features": {
+                                    "shell_tool": False,
+                                    "view_image": False,
+                                    "apps": False,
+                                    "plugins": False,
+                                    "multi_agent": False,
+                                    "memories": False,
+                                    "hooks": False,
+                                },
+                            },
+                        }
                     thread = codex.thread_start(
                         approval_mode=sdk.approval_mode.deny_all,
                         cwd=str(cwd),
                         model=model,
                         sandbox=sdk_sandbox,
+                        **thread_options,
                     )
                 else:
                     _unarchive_thread_if_needed(codex, provider_session_id, sdk)
@@ -198,7 +245,8 @@ class CodexSdkRunner:
             thread_id = _non_empty_string(getattr(thread, "id", None))
             if not thread_id:
                 raise RuntimeError("Codex SDK did not return a thread id")
-            archive_thread_ids.append(thread_id)
+            if ephemeral_instructions is None:
+                archive_thread_ids.append(thread_id)
             if (
                 source_provider_session_id is not None
                 and thread_id == source_provider_session_id

@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
@@ -148,6 +149,8 @@ class RightMemoryRuntime:
         self.config = config
         if config.retrieve_backend not in {"agent", "embedding"}:
             raise ValueError(f"unsupported retrieval backend: {config.retrieve_backend}")
+        if config.retrieve_filter is not None and config.retrieve_backend != "embedding":
+            raise ValueError("retrieval filtering requires the embedding backend")
         self._embedding_retriever = None
         if config.retrieve_backend == "embedding":
             if config.role != "retrieve" or config.embedding is None:
@@ -166,7 +169,7 @@ class RightMemoryRuntime:
         self._sync_manager: SyncManager | None = None
         self._retrieve_sync_result: SyncResult | None = None
         self._last_write_result: IsolatedWriteResult | None = None
-        uses_codex_sdk = (
+        uses_codex_sdk = config.retrieve_filter is not None or (
             self._embedding_retriever is None
             and config.runtime_mode == "cli-agent"
             and config.agent_cli is not None
@@ -174,6 +177,13 @@ class RightMemoryRuntime:
         )
         self._codex_runner = codex_runner or (CodexSdkRunner() if uses_codex_sdk else None)
         self._owns_codex_runner = codex_runner is None and self._codex_runner is not None
+        self._retrieval_filter = None
+        if config.retrieve_filter is not None:
+            from .retrieval_filter import RetrievalFilter
+
+            self._retrieval_filter = RetrievalFilter(
+                config.retrieve_filter, self._codex_runner, trace_event=self._trace,
+            )
         self.agent = (
             None if self._embedding_retriever is not None
             else self._build_cli_agent() if config.runtime_mode == "cli-agent" else self._build_agent()
@@ -573,28 +583,53 @@ class RightMemoryRuntime:
             self._pull_file_views_for_retrieve()
             if on_started is not None:
                 on_started()
-            try:
-                result = self._embedding_retriever.retrieve(message)
-            except EmbeddingServiceError:
-                if self.config.agent_cli is None and self.config.model_id is None:
-                    raise
-                logging.getLogger(__name__).warning(
-                    "Embedding service failed; using the configured agent retriever for this query"
-                )
-                self._trace("embedding_retrieval_fallback", backend="agent")
-                return self._run_retrieve_fallback(session_id, message, include_returned=include_returned)
+            for attempt in range(2):
+                try:
+                    retrieval_started = time.perf_counter()
+                    result = self._embedding_retriever.retrieve(message)
+                except EmbeddingServiceError:
+                    if self.config.agent_cli is None and self.config.model_id is None:
+                        raise
+                    logging.getLogger(__name__).warning(
+                        "Embedding service failed; using the configured agent retriever for this query"
+                    )
+                    self._trace("embedding_retrieval_fallback", backend="agent")
+                    return self._run_retrieve_fallback(session_id, message, include_returned=include_returned)
+                self._trace("embedding_retrieval_finished", result_count=len(result.entries),
+                            duration_ms=(time.perf_counter() - retrieval_started) * 1000,
+                            output_chars=len(result.text))
+                output = result.text
+                if self._retrieval_filter is not None and result.entries:
+                    filter_started = time.perf_counter()
+                    output = self._retrieval_filter.run(message, result.text)
+                    if len(output) > self.config.retrieve_max_output_chars:
+                        raise RetrieveSelectionError("Filtered retrieval exceeds the configured output limit")
+                    self._trace("retrieval_filter_finished", model=self.config.retrieve_filter.model,
+                                reasoning_effort=self.config.retrieve_filter.reasoning_effort,
+                                duration_ms=(time.perf_counter() - filter_started) * 1000,
+                                input_chars=len(result.text), output_chars=len(output))
+                with MemoryWriteLock(self.config.memory_root):
+                    if self._retrieval_filter is not None and result.entries:
+                        from .retrieval_index import build_retrieval_corpus
+
+                        if build_retrieval_corpus(self.config.memory_root).fingerprint != result.fingerprint:
+                            self._trace("retrieval_filter_source_changed", attempt=attempt + 1)
+                            continue
+                    memory_commit = current_memory_head(self.config.memory_root)
+                break
+            else:
+                raise RuntimeError("Memory changed during both filtered retrieval attempts; retry the query")
             session.save_json(json.dumps({
                 "session_id": session_id,
-                "memory_commit": current_memory_head(self.config.memory_root),
+                "memory_commit": memory_commit,
                 "source_fingerprint": result.fingerprint,
                 "entries": {entry.key: entry.version for entry in result.entries},
             }, ensure_ascii=False).encode("utf-8"))
-            self._trace("embedding_retrieval_finished", result_count=len(result.entries))
             # Every query already allows previously returned content, including --include-returned calls.
-            return result.text
+            return output
 
     def _run_retrieve_fallback(self, session_id: str, message: str, *, include_returned: bool) -> str:
-        config = replace(self.config, retrieve_backend="agent", embedding=None)
+        config = replace(self.config, retrieve_backend="agent", embedding=None, retrieve_filter=None)
         fallback = RightMemoryRuntime(config, codex_runner=self._codex_runner)
         fallback._active_trace = self._active_trace
         try:

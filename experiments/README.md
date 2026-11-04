@@ -2,6 +2,23 @@
 
 [retrieval_embeddings.py](retrieval_embeddings.py) and [retrieval_reranker.py](retrieval_reranker.py) compare models on frozen, disposable Memory copies. [retrieval_runtime.py](retrieval_runtime.py) verifies the optional embedding backend through the actual CLI and MCP interfaces. Private inputs and raw results remain under ignored `tmp/embedding-retrieval/`.
 
+## Natural-language filtering — 2026-11-04
+
+[retrieval_filter.py](retrieval_filter.py) compares the original embedding results with a GPT-6 Luna/low reading of exactly the same candidates. It freezes a hash-checked disposable source copy and saves full before/after text and per-stage timing to an ignored private output directory. It does not change stored memories.
+
+Four actual queries from recent retrieval logs were replayed once each. Embedding retrieval was warmed separately; the filter used a fresh ephemeral Codex conversation for every query.
+
+| Query topic | Before characters | After characters | Retrieval seconds | Filter seconds | Combined seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Viewer diagnosis | 84,573 | 1,837 | 2.85 | 25.85 | 28.71 |
+| Lettering quality | 36,394 | 2,018 | 2.38 | 19.70 | 22.08 |
+| Plugin recommendations | 41,043 | 1,983 | 3.05 | 16.33 | 19.38 |
+| Video deployment | 46,900 | 2,163 | 2.49 | 22.40 | 24.89 |
+
+Manual review found useful deployment paths, user preferences, and distinctions between observed results and unverified current status retained in these outputs. Character reduction is not a completeness score: this is four cases, one run each, judged by the implementing agent. It does not establish general quality, reliable rejection of unrelated candidates, or latency percentiles. The paired measurements cover retrieval and filtering stages; they exclude the MCP wrapper, synchronization, and the final source-consistency check. A separate live MCP smoke call returned natural language successfully.
+
+Luna added 16–26 seconds. Warm connection startup and thread opening together were below one second; the first call's opening took about four seconds. Most elapsed time was in the model turn. Reusing conversation history would therefore save little measured overhead while risking cross-query contamination. A separate live check confirmed the ephemeral thread was absent from active and archived native listings after close, while a persisted control thread remained readable.
+
 ## Integrated embedding retrieval — 2026-09-29
 
 The optional runtime backend uses Nemotron 3 Embed 1B and Jina reranker v3.5, with forty candidates and at most ten returned entries. The Windows client owns the canonical source index and incremental vector cache; the models run on L20 GPU 1 through a private SSH tunnel. The configured host is a service address, not a hard-coded server dependency.

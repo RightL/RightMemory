@@ -433,6 +433,7 @@ class EmbeddingConfigurationTests(unittest.TestCase):
 
     def test_profile_seed_preserves_retrieval_service_settings(self):
         settings = {"backend": "embedding", "embedding": {"url": "http://localhost:8766"}, "max_output_chars": 15000,
+                    "filter": {"model": "gpt-6-luna", "reasoning_effort": "low"},
                     "agent_cli": {"provider": "codex", "model": "test-model"}}
         self.assertEqual(_profile_seed_config({"retrieve": settings})["retrieve"], settings)
 
@@ -451,10 +452,14 @@ class EmbeddingConfigurationTests(unittest.TestCase):
     def test_doctor_checks_configured_cli_fallback(self):
         from rightmemory.doctor import _load_agent_cli_configs
         cli = RuntimeConfig(role="retrieve", runtime_mode="cli-agent", agent_cli=AgentCliConfig("codex"))
-        embedding = replace(cli, retrieve_backend="embedding", embedding=EmbeddingRetrieveConfig("http://localhost"))
-        with patch("rightmemory.doctor.load_config", side_effect=lambda role, **kw: embedding if role == "retrieve" else replace(cli, role=role)):
-            configs = _load_agent_cli_configs([])
-        self.assertEqual(configs["retrieve"], cli)
+        for filter_config in (None, AgentCliConfig("codex", "gpt-6-luna", "low")):
+            with self.subTest(filter_enabled=filter_config is not None):
+                embedding = replace(cli, retrieve_backend="embedding",
+                                    embedding=EmbeddingRetrieveConfig("http://localhost"),
+                                    retrieve_filter=filter_config)
+                with patch("rightmemory.doctor.load_config", side_effect=lambda role, **kw: embedding if role == "retrieve" else replace(cli, role=role)):
+                    configs = _load_agent_cli_configs([])
+                self.assertEqual(configs["retrieve"], cli)
 
     def test_http_transport_failures_are_service_failures(self):
         from http.client import IncompleteRead
