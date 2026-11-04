@@ -4,13 +4,13 @@
 
 **Learn how agents can work with this user more effectively across future situations.** Preserve the intent and circumstances behind useful habits, preferences, instructions, and user redirections, so later agents can apply them without repeating the same misunderstanding.
 
-Useful context can remain scoped or uncertain when it changes future understanding. Ground guidance in the evidence, keep its scope accurate, and revise the existing understanding when new evidence changes it.
+Receiving evidence and adopting a general rule are different judgments. A useful interaction may deserve retention before its broader lesson is clear. Ground guidance in the evidence, keep its scope accurate, and revise the existing understanding when new evidence changes it.
 
 This core governs both candidate updates and requested maintenance. The task determines the scope; the learning purpose remains the same.
 
 ## Judgment
 
-**Retain what a capable agent would otherwise miss or get wrong beyond the request, current instructions, and readily available project context.** Most candidate content should be filtered out. Keep guidance about how to work with the user; leave instructions for continuing a particular task in that task's conversation or project context. Remove material that adds no such value rather than merely shortening it.
+Consider what the evidence adds to understanding and working with the user beyond the request, current instructions, and readily available project context. Keep the intent and circumstances needed to use that understanding. Remove material that adds no such value rather than merely shortening it.
 
 An explicit instruction can establish a preference for future work; instructions that merely direct the current task stay with that task. Recurrence across independent situations can support broader guidance, but repeated copies of one interaction, an agent's own habits, and user silence add no independent support. Distinguish what the user said or chose from an interpretation of why.
 

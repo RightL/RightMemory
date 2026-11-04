@@ -23,11 +23,12 @@ to interpret it. A useful candidate need not already support a stable conclusion
 Memory, guidance, and skills curators judge it against their own domain cores; submission
 does not write a rule, a skill, or a Memory graph entry.
 
-For work evidence, capture what a later agent would otherwise miss or get wrong beyond
-what it can already do or readily discover from a short request and available project
-context. Include the evidence needed to understand the finding and its limits; link
-maintained resources for the fuller method. One-off or unsettled evidence can still be
-useful. Leave out routine progress and task history with no independent future value.
+For work evidence, consider what the user was trying to accomplish and how the experience
+could help a future agent assist with similar work with less direction. Preserve the
+method, human contributions, outcome, and relevant resources that carry that value beyond
+what an agent can already do or readily discover from a short request and project context.
+One-off or unsettled evidence can still be useful without becoming a general rule. Leave
+out routine progress and copies of project artifacts with no independent future value.
 
 Combine related evidence at a natural boundary. Reuse request_id and identical evidence
 when retrying the same submission; distinct later occurrences receive new request IDs.

@@ -4,7 +4,7 @@
 
 Do more selective recording instructions preserve useful findings while reducing task histories and guidance that a capable agent can already infer from the request, maintained instructions, or readily available project context?
 
-The revision keeps the established domain purposes and ordinary Memory admission rules. It promotes the existing work-experience value criterion into the core, extends that criterion to guidance, and asks curators to reassess affected existing records rather than merely append evidence. A submitting agent's retention recommendation is subject to the same value judgment; an explicit user memory request remains distinct. Repeated appeals to preserve material before raw candidates disappear are removed. The submission description also asks for the information the future agent would otherwise miss.
+The current revision preserves the positive purpose of learning to assist the user with similar work with less direction, judged in light of what the user was trying to accomplish. Methods, user contributions, result standards, and useful partial experiences remain part of that purpose. The added-value criterion supports selection rather than replacing the learning objective. Curators reassess affected existing records rather than merely append evidence. A submitting agent's retention recommendation remains subject to judgment, distinct from an explicit user memory request. Ordinary Memory admission rules are unchanged. Earlier revisions and their limitations are recorded below.
 
 The historical replay evaluates curator changes. Its submissions are frozen, so it does not measure the effect of the revised submission description. It does not evaluate retrieval or apply a cleanup to live memory.
 
@@ -51,7 +51,7 @@ For the paired run, use a new output directory, `--prompt-revision working-tree`
 
 When masking credentials, pass the same `--redact-values-file <ignored-private-json>` to both variants. This optional file contains exact values to replace; it does not automatically discover credentials or encoded variants. Masking happens before the disposable Git history is created, and the manifest identifies affected files and whether the semantic snapshot remains byte-exact. Selected submissions remain unchanged: a matching value in candidate evidence stops preparation instead of silently altering the batch. The values file is never copied into the model's workspace.
 
-## Results
+## Initial replay results
 
 All reported model runs use exact historical copies, with the user's explicit approval. Each domain's variants match on initial semantic state, ordered candidate proofs, task input, runtime, model, and reasoning effort. Normalized source differences are confined to the intended role prompt and domain reference.
 
@@ -83,10 +83,37 @@ The baseline added 362 words; the revision added 284. Both reconciled obsolete d
 
 The revised output kept a particular visual choice scoped to that comparison, whereas the baseline inferred a broader visual priority. It still added a source-code implementation detail already recoverable from the project and rewrote an unrelated open question. The change therefore shows a modest benefit, not a solution to Memory growth or unnecessary editing.
 
-### Limits and verification
+## Correction after intent review
 
-These are development replays on one batch per domain, with iterative changes informed by the same batches. There is no held-out evaluation, repeated final-variant sampling, or evidence yet about accumulation over several update cycles. The unavailable external project resources may encourage self-contained duplication in both variants. The submission wording change needs observation on new work; frozen historical submissions cannot test it. No live memory cleanup, installation, or retrieval change is part of this experiment.
+The user identified that the initial revision overfocused on the redundancy concern and weakened earlier intent. In particular, promoting the added-value criterion into the skills core displaced the positive learning purpose, and the generic future-agent wording did not sufficiently connect the lesson to what the user was doing. The correction restores that purpose and the original wording about methods, judgment, user contributions, success criteria, resources, and uncertainty. Useful interactions may again be retained before their broader lesson is clear. Added-value checks remain in Judgment, without a presumed majority-rejection outcome for guidance or skills. Existing-record reassessment remains.
 
-All ten outputs passed graph validation and remained within their domain's allowed paths. Eight focused replay safety tests and syntax checks passed. A sandboxed safety-test rerun hit Windows temporary-directory permission errors; the same eight tests passed outside that sandbox. Tests do not assert agent-facing wording or semantic quality.
+The submission description is corrected in the same direction. No case-specific rule excludes the experiences of agents the user builds; usefulness depends on the user's objective and the future reader. There is no storage or retrieval change.
+
+The `guidance-user-purpose-1` / `-2` and `skills-user-purpose-1` / `-2` runs repeat the exact original batches twice per changed domain. The configured model and effort remain unchanged. Ordinary Memory is not rerun because its assembled instructions have not changed. Source hashes and frozen-state checks distinguish the new variants from the earlier selected revisions.
+
+Before inspecting these outputs, review will check whether they preserve the user's first-frame training choice, the distinction between a working pipeline and demonstrated quality, useful interpolation and encoding discoveries, and uncertainty about unfinished data preparation. Guidance should preserve useful user context without turning a chat-only delegation choice into continuing guidance. A fuller record is not a failure merely because it is longer; copied inventories and routine histories still need independent value. These batches have limited coverage of learning for an agent builder versus learning for a created agent.
+
+All four runs completed with exact initial-state and candidate matches, the same model/effort, valid graphs, and no out-of-domain writes. Within each new pair, prompt-source hashes are identical. Compared with `guidance-reassessed` and `skills-lesson-core`, the normalized source changes are confined to the corresponding domain rules. Execution logic is unchanged; the changed submission-description string is not part of the frozen curator inputs.
+
+| Run | Net words | Net bytes | New files | Changed files | Seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `guidance-user-purpose-1` | +115 | +956 | 0 | 1 | 252.9 |
+| `guidance-user-purpose-2` | +101 | +859 | 0 | 1 | 271.2 |
+| `skills-user-purpose-1` | +2,394 | +19,299 | 2 | 5 | 331.8 |
+| `skills-user-purpose-2` | +2,073 | +16,781 | 1 | 3 | 343.7 |
+
+Both guidance runs kept the useful exact-host access correction and its supporting circumstances. Both also extended the register of individual conversations' LiteWorker stop instructions. They correctly avoided inferring a general delegation ban, but continued to record chat-specific continuation instructions already governed by the conversation and ordinary instruction following. These outputs regress against the earlier `guidance-reassessed` result, which removed that register. This comparison does not isolate wording effects from model variation; the boundary remains unreliable.
+
+Skills run 1 preserves the user's first-frame-plus-text choice, the separate source-screening correction, and the distinction between a working training pipeline and demonstrated adaptation quality. It retains the interpolation and legacy-encoding findings with useful qualifications. However, it creates two substantial case documents and adds environment inventories, validation counts, observer history, and detailed screening procedure alongside links to their project resources. More explicit purpose has not by itself resolved duplication or growth. Its useful findings also appeared in the earlier variants, so retaining them is not proof of an improvement over those variants.
+
+Skills run 2 consolidates the training evidence into the existing case and organizes the validation method into four stages, making the useful procedure easier to follow. It preserves the user's choices, the important discoveries, and the limits of partial results. Independent review found no clear factual error or important scope loss in the inspected changes. The runtime case still copies installed versions and historical deployment details; the other cases still carry observer history and test-count inventories. It preserves useful coverage and gives one clearer method presentation, without demonstrating a reliable improvement over `skills-lesson-core` in what gets selected.
+
+The corrected wording restores the intended learning purpose, but these simulations do not demonstrate a reliable improvement in recording selection. They do not justify treating fewer words as the objective or making another untested change to the core merely to shrink these outputs.
+
+## Limits and verification
+
+These are development replays on one batch per domain, with iterative changes informed by the same batches. The corrected guidance and skills variants have two runs each; earlier variants generally have one. There is no held-out evaluation or evidence yet about accumulation over several update cycles. The unavailable external project resources may encourage self-contained duplication in all variants. The submission wording change needs observation on new work; frozen historical submissions cannot test it. No live memory cleanup, installation, or retrieval change is part of this experiment.
+
+All fourteen outputs passed graph validation and remained within their domain's allowed paths. Eight focused replay safety tests passed during the initial implementation. The intent correction changes agent-facing text only; syntax compilation and whitespace checks passed, and the full suite was not rerun. A sandboxed safety-test rerun during the initial implementation hit Windows temporary-directory permission errors; the same eight tests passed outside that sandbox. Tests do not assert agent-facing wording or semantic quality.
 
 The full repository suite ran 1,505 tests with 33 skips, four assertion failures, and two errors. All six failures/errors reproduced on an unchanged `06314c6` source snapshot using the same installed RightMemory Python environment: three Pursuit grammar assertions, one learning-inventory ordering assertion, a DeepSeek profile error, and a Windows web-process connection error. Earlier baseline runs used the system Python instead; their Windows passes do not establish the cause of the venv failure. The Windows failure's cause remains uninvestigated. The full suite included the first five safety tests; the three subsequently added masking checks were covered in the focused eight-test run.
