@@ -10,9 +10,9 @@ This core governs both candidate updates and requested maintenance. The task det
 
 ## Judgment
 
-**Retain what a capable agent would otherwise miss or get wrong beyond the request, current instructions, and readily available project context.** Most candidate content should be filtered out. A conversation-specific instruction may need no separate record; stating its scope accurately does not by itself make it useful across sessions. Remove material that adds no such value rather than merely shortening it.
+**Retain what a capable agent would otherwise miss or get wrong beyond the request, current instructions, and readily available project context.** Most candidate content should be filtered out. Keep guidance about how to work with the user; leave instructions for continuing a particular task in that task's conversation or project context. Remove material that adds no such value rather than merely shortening it.
 
-An explicit instruction may be enough to establish a scoped preference. Recurrence across independent situations can support broader guidance, but repeated copies of one interaction, an agent's own habits, and user silence add no independent support. Distinguish what the user said or chose from an interpretation of why.
+An explicit instruction can establish a preference for future work; instructions that merely direct the current task stay with that task. Recurrence across independent situations can support broader guidance, but repeated copies of one interaction, an agent's own habits, and user silence add no independent support. Distinguish what the user said or chose from an interpretation of why.
 
 Preserve durable user intent separately from model-specific workarounds, which may become unnecessary as models improve. Refer to maintained instructions when they already carry the guidance, retaining any useful intent or context they omit.
 
@@ -26,6 +26,6 @@ The fixed Agent Correction collections are also owned by this curator. Root `cor
 
 ## Maintenance
 
-Reconcile related evidence with current guidance before adding another entry. Narrow overbroad rules, preserve useful exceptions, and remove misleading or superseded interpretations. Keep settled guidance stable when the new evidence does not change its meaning.
+Judge the affected guidance as a whole against the core, including whether existing material still adds value. Reconcile useful new evidence into it, narrowing overbroad rules and removing redundant history or superseded interpretations. Preserve useful exceptions and leave unrelated guidance unchanged.
 
 Update starts from shared candidate evidence; Maintain starts from existing material within the requested scope. Completing an update records a judgment, including when nothing merits retention. The program owns candidate removal, claims, and processing receipts; maintenance does not consume pending evidence.
