@@ -2,6 +2,8 @@
 
 [Curation recording](curation-recording.md) compares existing and revised recording prompts on historical submissions and their exact prepared Memory states. [curation_recording.py](curation_recording.py) keeps inputs and model outputs in ignored `tmp/recording-quality/`; its report distinguishes recording quality from output length.
 
+[Curation maintenance](curation-maintenance.md) evaluates installed native maintenance with a minimal request and separate deletion-focused prompt variants, using Astra at xhigh on the same frozen Memory state.
+
 [retrieval_embeddings.py](retrieval_embeddings.py) and [retrieval_reranker.py](retrieval_reranker.py) compare models on frozen, disposable Memory copies. [retrieval_runtime.py](retrieval_runtime.py) verifies the optional embedding backend through the actual CLI and MCP interfaces. Private inputs and raw results remain under ignored `tmp/embedding-retrieval/`.
 
 ## Integrated embedding retrieval — 2026-09-29
