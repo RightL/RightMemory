@@ -2,6 +2,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -44,6 +45,9 @@ class BlockingStream:
     def __next__(self):
         self.stopped.wait()
         raise StopIteration
+
+    def close(self):
+        pass
 
 
 class TimeoutProcess:
@@ -157,6 +161,87 @@ class CodexAppServerClientTests(unittest.TestCase):
         self.assertTrue(results[0].deleted)
         self.assertFalse(results[1].deleted)
         self.assertIn("busy", results[1].error)
+
+    def test_acknowledged_results_survive_failed_shutdown(self):
+        process = FakeProcess(
+            '{"id":0,"result":{}}\n'
+            '{"id":1,"result":{}}\n'
+            '{"id":2,"error":{"code":-32000,"message":"busy"}}\n',
+            returncode=-9,
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            with patch("rightmemory.codex_app_server.subprocess.Popen", return_value=process):
+                results = CodexAppServerClient(Path(tempdir)).delete_threads(
+                    ["confirmed", "rejected", "unanswered"],
+                )
+        self.assertTrue(results[0].deleted)
+        self.assertIn("busy", results[1].error)
+        self.assertFalse(results[2].deleted)
+        self.assertIn("exited", results[2].error)
+
+    def test_response_without_result_or_error_is_not_success(self):
+        process = FakeProcess('{"id":0,"result":{}}\n{"id":1}\n')
+        with tempfile.TemporaryDirectory() as tempdir:
+            with patch("rightmemory.codex_app_server.subprocess.Popen", return_value=process):
+                [result] = CodexAppServerClient(Path(tempdir)).delete_threads(["invalid"])
+        self.assertFalse(result.deleted)
+
+    def test_real_child_acknowledges_batch_but_does_not_exit_on_eof(self):
+        script = """
+import json, sys, time
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" in message:
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+time.sleep(120)
+"""
+        with tempfile.TemporaryDirectory() as tempdir:
+            with patch("rightmemory.codex_app_server._app_server_command",
+                       return_value=[sys.executable, "-u", "-c", script]):
+                results = CodexAppServerClient(Path(tempdir), timeout_seconds=5).delete_threads(
+                    [f"thread-{index}" for index in range(15)],
+                )
+        self.assertTrue(all(result.deleted for result in results))
+
+    def test_batch_can_progress_longer_than_one_response_timeout(self):
+        script = """
+import json, sys, time
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" in message:
+        if message["id"]:
+            time.sleep(0.4)
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+"""
+        with tempfile.TemporaryDirectory() as tempdir:
+            with patch("rightmemory.codex_app_server._app_server_command",
+                       return_value=[sys.executable, "-u", "-c", script]):
+                results = CodexAppServerClient(Path(tempdir), timeout_seconds=1).delete_threads(
+                    [f"thread-{index}" for index in range(4)],
+                )
+        self.assertTrue(all(result.deleted for result in results))
+
+    def test_notifications_and_duplicate_replies_do_not_extend_pending_timeout(self):
+        script = """
+import json, sys, time
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("id") in (0, 1):
+        print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif message.get("id") == 2:
+        for _ in range(50):
+            print(json.dumps({"method": "progress", "params": {}}), flush=True)
+            print(json.dumps({"id": 1, "result": {}}), flush=True)
+            time.sleep(0.1)
+"""
+        with tempfile.TemporaryDirectory() as tempdir:
+            with patch("rightmemory.codex_app_server._app_server_command",
+                       return_value=[sys.executable, "-u", "-c", script]):
+                results = CodexAppServerClient(Path(tempdir), timeout_seconds=1).delete_threads(
+                    ["confirmed", "stalled"],
+                )
+        self.assertTrue(results[0].deleted)
+        self.assertFalse(results[1].deleted)
 
     def test_already_missing_rollout_counts_as_deleted(self):
         process = FakeProcess(
