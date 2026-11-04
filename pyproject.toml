@@ -30,7 +30,7 @@ classifiers = [
 dependencies = [
   "fastapi>=0.115.0",
   "mcp>=2,<3",
-  "pydantic-ai-slim[anthropic,openai]>=1.0.0",
+  "pydantic-ai-slim[anthropic,openai]>=2.65.0,<3",
   "uvicorn>=0.30.0",
 ]
 
@@ -41,7 +41,7 @@ embedding-service = [
   "numpy>=2,<3",
 ]
 codex-sdk = [
-  "openai-codex==0.162.1",
+  "openai-codex==0.163.0",
 ]
 
 [project.scripts]

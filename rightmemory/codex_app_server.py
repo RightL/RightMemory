@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS = 30
+APP_SERVER_SHUTDOWN_GRACE_SECONDS = 1
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,7 @@ class CodexAppServerClient:
         responses: dict[int, dict[str, Any]] = {}
         parse_errors: list[str] = []
         startup_error: str | None = None
+        initialized_ok = False
         try:
             _send_messages(process.stdin, [initialize])
             initialized = _wait_for_responses(
@@ -146,6 +148,7 @@ class CodexAppServerClient:
             else:
                 startup_error = _response_error(initialize_response)
             if startup_error is None:
+                initialized_ok = True
                 _send_messages(
                     process.stdin,
                     [{"method": "initialized", "params": {}}, *action_messages],
@@ -154,15 +157,21 @@ class CodexAppServerClient:
                     output_queue,
                     responses,
                     expected=set(request_ids),
-                    deadline=deadline,
+                    deadline=time.monotonic() + self.timeout_seconds,
                     parse_errors=parse_errors,
+                    per_response_timeout=self.timeout_seconds,
                 )
         except (BrokenPipeError, OSError, TimeoutError) as exc:
             startup_error = f"Codex App Server protocol failed: {type(exc).__name__}: {exc}"
         finally:
-            returncode = _finish_process(process, deadline)
+            returncode = _finish_process(
+                process, time.monotonic() + APP_SERVER_SHUTDOWN_GRACE_SECONDS,
+            )
             stdout_thread.join(timeout=0.2)
             stderr_thread.join(timeout=0.2)
+            for stream, reader in ((process.stdout, stdout_thread), (process.stderr, stderr_thread)):
+                if not reader.is_alive():
+                    stream.close()
 
         if returncode != 0:
             detail = "".join(stderr_lines).strip() or f"exit status {returncode}"
@@ -173,9 +182,12 @@ class CodexAppServerClient:
         results: list[tuple[str, str | None]] = []
         for request_id, thread_id in request_ids.items():
             response = responses.get(request_id)
-            error = startup_error or response_error(response)
-            if response is None and error is None:
-                error = f"missing {method} response"
+            # The server confirms persistence before replying. A later shutdown
+            # timeout or failure of another request cannot undo that result.
+            if initialized_ok and response is not None:
+                error = response_error(response)
+            else:
+                error = startup_error or f"missing {method} response"
             results.append((thread_id, _bounded_error(error) if error is not None else None))
         return results
 
@@ -193,6 +205,7 @@ def _wait_for_responses(
     expected: set[int],
     deadline: float,
     parse_errors: list[str],
+    per_response_timeout: float | None = None,
 ) -> bool:
     line_number = 0
     while not expected.issubset(responses):
@@ -221,6 +234,11 @@ def _wait_for_responses(
             continue
         request_id = value.get("id")
         if isinstance(request_id, int):
+            if (per_response_timeout is not None
+                    and request_id in expected and request_id not in responses):
+                # Give each still-pending action its response window. Notifications
+                # and duplicate replies cannot keep an unresponsive batch alive.
+                deadline = time.monotonic() + per_response_timeout
             responses[request_id] = value
     return True
 
@@ -292,7 +310,7 @@ def _response_error(response: dict[str, Any] | None) -> str | None:
         return None
     error = response.get("error")
     if error is None:
-        return None
+        return None if "result" in response else "missing App Server result"
     if isinstance(error, dict):
         message = error.get("message")
         code = error.get("code")

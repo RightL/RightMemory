@@ -657,7 +657,7 @@ provider = "claude"
 model = "sonnet"
 ```
 
-Use `rightmemory doctor agent-cli` after configuring CLI-agent mode. It checks that role config resolves to CLI-agent execution, the Codex SDK runtime or configured Claude command is available, and read/write role probes can complete.
+Use `rightmemory doctor agent-cli` after configuring CLI-agent mode. It checks that role config resolves to CLI-agent execution, the Codex SDK runtime or configured Claude command is available, and read/write role probes can complete. Codex write roles use full filesystem access; the doctor reports that policy rather than expecting an outside-root write to be blocked. Conversation cleanup uses each confirmed App Server result even if the owned server later needs to be stopped.
 
 CLI-agent Retrieve keeps one reusable internal prefix-base provider conversation for each exact combination of canonical role instructions, stable Memory/Pursuit/Agent Correction snapshot, and effective provider configuration. RightMemory initializes the base once with an empty-selection turn, then Codex or Claude forks it for each new `rightmemory retrieve --session <id>` session. The bootstrap result is internal and does not enter that session's delivery coverage.
 
