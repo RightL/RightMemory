@@ -103,7 +103,7 @@ def _load_agent_cli_configs(checks: list[DoctorCheck], *, memory_root: Path | No
             ))
             if config.agent_cli is None:
                 continue
-            config = replace(config, retrieve_backend="agent", embedding=None)
+            config = replace(config, retrieve_backend="agent", embedding=None, retrieve_filter=None)
         if config.runtime_mode != "cli-agent" or config.agent_cli is None:
             failures.append(f"{role}: runtime_mode={config.runtime_mode}, agent_cli={config.agent_cli is not None}")
             continue
