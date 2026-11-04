@@ -318,19 +318,24 @@ def prepare_root(source: Path, commit: str, root: Path, data: dict,
 def build_prompt(root: Path, data: dict, revision: str) -> tuple[str, dict]:
     selected = revision if revision == "working-tree" else resolve_commit(REPOSITORY, revision)
     sources = {}
+    normalized_sources = {}
 
     def read(relative: str) -> str:
         raw = (contained_path(REPOSITORY, relative).read_bytes() if selected == "working-tree"
                else git(REPOSITORY, "show", f"{selected}:{relative}"))
         sources[relative] = sha256(raw)
-        return raw.decode("utf-8")
+        # Match the canonical read_text readers for Git blobs and Windows checkouts.
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        normalized_sources[relative] = sha256(text.encode("utf-8"))
+        return text
 
     role = "update" if data["domain"] == "memory" else f"{data['domain']}-curator"
     with patch.object(prompt_module, "_read_prompt_file", lambda name: read(f"rightmemory/{name}")), \
             patch.object(prompt_module, "read_reference",
                          lambda name: read(f"rightmemory/reference/{REFERENCE_FILES[name]}")):
         value = _turn_prompt(root, role, _curation_input(data))
-    return value, {"revision": selected, "sources_sha256": sources}
+    return value, {"revision": selected, "sources_sha256": sources,
+                   "normalized_sources_sha256": normalized_sources}
 
 
 def replay_rules(root: Path, domain: str, historical_agents: str) -> str:
