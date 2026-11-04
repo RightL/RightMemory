@@ -14,6 +14,7 @@ from rightmemory.learning import (
     LEARNING_DOMAINS, learning_batch_candidate_ids, learning_claims, list_learning_candidates,
 )
 from rightmemory.curation_cli import main as curate_main, submit_main
+from rightmemory.curation_worker import CurationWorker
 from rightmemory.learning_coordinator import LearningCoordinator
 from rightmemory.learning_service import (
     LearningClaimLost,
@@ -490,6 +491,58 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["output"], "No rule yet")
         self.assertEqual(self._git("rev-parse", "HEAD"), head)
+
+    def test_worker_recovers_publication_before_next_batch_retry_budget(self):
+        self._submit()
+        task = self.service.begin("guidance", _executor="configured")
+        original = LearningCoordinator.finalize
+
+        def lose_reply(coordinator, *args, **kwargs):
+            original(coordinator, *args, **kwargs)
+            raise RuntimeError("lost reply")
+
+        with patch.object(LearningCoordinator, "finalize", lose_reply):
+            with self.assertRaisesRegex(RuntimeError, "lost reply"):
+                self.service.complete(task["task_id"])
+        self._submit("A separate later observation", "request-two")
+        worker = CurationWorker(self.root)
+        worker._write({"failures": {"guidance": {
+            "task_id": task["task_id"], "attempts": 1,
+            "error": "lost reply", "next_retry_at": None,
+        }}})
+        calls = []
+
+        class Executor:
+            def __init__(self, config):
+                pass
+
+            def run_session_turn(self, task_id, _message):
+                calls.append(task_id)
+                if len(calls) == 1:
+                    raise RuntimeError("first attempt for the new batch failed")
+                return "No additional guidance needed"
+
+            def cleanup(self):
+                pass
+
+        notices = self.service.notices
+        with (
+            patch.object(self.service, "notices",
+                         side_effect=lambda: [item for item in notices()
+                                              if item["domain"] == "guidance"]),
+            patch("rightmemory.runtime.RightMemoryRuntime", Executor),
+            patch("rightmemory.config.load_config",
+                  side_effect=lambda role, memory_root: RuntimeConfig(
+                      role=role, memory_root=memory_root,
+                      sync=load_sync_config(memory_root))),
+            patch("rightmemory.curation_worker.RETRY_COOLDOWN_SECONDS", 0),
+        ):
+            self.assertEqual(worker.run(self.service), 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+        self.assertNotEqual(calls[0], task["task_id"])
+        self.assertEqual(worker.status()["failures"], {})
+        self.assertFalse(list_learning_candidates(self.root, domain="guidance"))
 
     def test_configured_execution_resumes_failed_task_and_uses_prepared_worktree(self):
         self._submit()

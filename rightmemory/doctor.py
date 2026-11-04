@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from .agent_cli import WRITE_ROLES
+from .agent_cli import WRITE_ROLES, _codex_sandbox
 from .agent_cli_cleanup import (
     AgentCliThreadCleanup,
     CODEX_FORK_BASE_RETENTION,
@@ -298,6 +298,13 @@ def _check_write_boundary(
     outside_parent: Path,
     run_nonce: str,
 ) -> None:
+    if (config.agent_cli is not None and config.agent_cli.provider == "codex"
+            and _codex_sandbox(config.role) == "full-access"):
+        checks.append(DoctorCheck(
+            "write permission policy", True,
+            "Codex write roles use full-access; an OS write boundary is not expected or tested",
+        ))
+        return
     token = f"RM_BOUNDARY_{uuid4().hex}"
     outside_path = outside_parent / f".rightmemory-doctor-boundary-{token}.tmp"
     prompt = (

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from rightmemory.codex_app_server import CodexThreadDeleteResult
 from rightmemory.config import AgentCliConfig, RuntimeConfig
-from rightmemory.doctor import _check_codex_thread_cleanup
+from rightmemory.doctor import _check_codex_thread_cleanup, _check_write_boundary
 from rightmemory.provider_threads import ProviderThreadStore
 
 
@@ -19,6 +19,21 @@ class FakeDeleteClient:
 
 
 class AgentCliDoctorCleanupTests(unittest.TestCase):
+    def test_full_access_write_role_reports_policy_without_outside_write(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            config = RuntimeConfig(
+                role="update", runtime_mode="cli-agent",
+                agent_cli=AgentCliConfig(provider="codex"), memory_root=root,
+            )
+            checks = []
+            with patch("rightmemory.doctor._runtime_turn") as run:
+                _check_write_boundary(checks, config, root.parent, "test")
+            run.assert_not_called()
+        self.assertEqual(len(checks), 1)
+        self.assertTrue(checks[0].ok)
+        self.assertEqual(checks[0].name, "write permission policy")
+
     def test_skips_cleanup_probe_when_no_role_uses_codex(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
