@@ -120,6 +120,7 @@ class RuntimeConfig:
     fresh_provider_session: bool = False
     retrieve_backend: str = "agent"
     embedding: EmbeddingRetrieveConfig | None = None
+    retrieve_filter: AgentCliConfig | None = None
 
     def __post_init__(self) -> None:
         if self.state_root is _STATE_ROOT_UNSET:
@@ -147,16 +148,20 @@ def load_config(role: str, memory_root: Path | None = None) -> RuntimeConfig:
                 state_root=root,
                 retrieve_backend="embedding",
                 embedding=_embedding_config(role_section.get("embedding")),
+                retrieve_filter=_retrieve_filter_config(role_section["filter"]) if "filter" in role_section else None,
                 retrieve_max_output_chars=_retrieve_max_output_chars(role, role_section),
                 debug_trace=_debug_trace(data.get("debug", {})),
                 sync=_sync_config(data.get("sync", {}), memory_root=root),
             )
             if _has_executor_config(role_section) or "agent_cli" in data:
                 fallback = _executor_runtime_config(role, data, role_section, root)
-                return replace(fallback, retrieve_backend="embedding", embedding=config.embedding)
+                return replace(fallback, retrieve_backend="embedding", embedding=config.embedding,
+                               retrieve_filter=config.retrieve_filter)
             return config
         if "embedding" in role_section:
             raise ValueError('[retrieve.embedding] requires backend = "embedding"')
+        if "filter" in role_section:
+            raise ValueError('[retrieve.filter] requires backend = "embedding"')
     return _executor_runtime_config(role, data, role_section, root)
 
 
@@ -372,12 +377,26 @@ def _allowed_role_keys(role: str) -> set[str]:
     if role == "pruner":
         allowed.update({"generation_commits", "revival_grace_checkpoints"})
     if role == "retrieve":
-        allowed.update({"max_output_chars", "backend", "embedding"})
+        allowed.update({"max_output_chars", "backend", "embedding", "filter"})
     return allowed
 
 
 def _has_executor_config(section: dict[str, object]) -> bool:
     return "model" in section or "agent_cli" in section
+
+
+def _retrieve_filter_config(value: object) -> AgentCliConfig:
+    context = "[retrieve.filter]"
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be a TOML table")
+    _reject_unknown_keys(value, {"model", "reasoning_effort"}, context)
+    model = value.get("model", "gpt-6-luna")
+    effort = value.get("reasoning_effort", "low")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError(f"{context}.model must be a non-empty string")
+    if not isinstance(effort, str) or effort.strip() not in CODEX_REASONING_EFFORTS:
+        raise ValueError(f"{context}.reasoning_effort must be one of: {', '.join(sorted(CODEX_REASONING_EFFORTS))}")
+    return AgentCliConfig(provider="codex", model=model.strip(), reasoning_effort=effort.strip())
 
 
 def _embedding_config(value: object) -> EmbeddingRetrieveConfig:

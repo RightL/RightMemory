@@ -30,6 +30,7 @@ class _CodexSdkBindings:
     invalid_request_error: type[Exception]
     reasoning_effort: Any
     thread_unsubscribe_response: Any
+    config_read_response: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +130,30 @@ class CodexSdkRunner:
             on_timing=on_timing,
         )
 
+    def run_ephemeral_text_turn(
+        self,
+        *,
+        prompt: str,
+        instructions: str,
+        cwd: Path,
+        model: str | None,
+        reasoning_effort: str | None,
+        on_timing: Callable[[CodexSdkTiming], None] | None = None,
+    ) -> CodexSdkRunResult:
+        """Run supplied text in a fresh, nonpersistent conversation without workspace context."""
+        return self._run_turn(
+            prompt=prompt,
+            provider_session_id=None,
+            source_provider_session_id=None,
+            cwd=cwd,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            sandbox="read-only",
+            on_thread_started=None,
+            on_timing=on_timing,
+            ephemeral_instructions=instructions,
+        )
+
     def _run_turn(
         self,
         *,
@@ -141,6 +166,7 @@ class CodexSdkRunner:
         sandbox: str,
         on_thread_started: Callable[[str], None] | None,
         on_timing: Callable[[CodexSdkTiming], None] | None,
+        ephemeral_instructions: str | None = None,
     ) -> CodexSdkRunResult:
         sdk = _load_codex_sdk()
         started_at = self._clock()
@@ -176,11 +202,20 @@ class CodexSdkRunner:
                         sandbox=sdk_sandbox,
                     )
                 elif provider_session_id is None:
+                    thread_options: dict[str, Any] = {}
+                    if ephemeral_instructions is not None:
+                        thread_options = {
+                            "ephemeral": True,
+                            "base_instructions": ephemeral_instructions,
+                            "developer_instructions": "",
+                            "config": _ephemeral_text_config(codex, cwd, sdk),
+                        }
                     thread = codex.thread_start(
                         approval_mode=sdk.approval_mode.deny_all,
                         cwd=str(cwd),
                         model=model,
                         sandbox=sdk_sandbox,
+                        **thread_options,
                     )
                 else:
                     _unarchive_thread_if_needed(codex, provider_session_id, sdk)
@@ -198,7 +233,8 @@ class CodexSdkRunner:
             thread_id = _non_empty_string(getattr(thread, "id", None))
             if not thread_id:
                 raise RuntimeError("Codex SDK did not return a thread id")
-            archive_thread_ids.append(thread_id)
+            if ephemeral_instructions is None:
+                archive_thread_ids.append(thread_id)
             if (
                 source_provider_session_id is not None
                 and thread_id == source_provider_session_id
@@ -381,7 +417,7 @@ def _load_codex_sdk() -> _CodexSdkBindings:
     try:
         from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox, TransportClosedError
         from openai_codex.errors import InvalidRequestError
-        from openai_codex.generated.v2_all import ThreadUnsubscribeResponse
+        from openai_codex.generated.v2_all import ConfigReadResponse, ThreadUnsubscribeResponse
         from openai_codex.types import ReasoningEffort
     except ImportError as exc:
         raise RuntimeError(_CODEX_SDK_INSTALL_ERROR) from exc
@@ -394,7 +430,48 @@ def _load_codex_sdk() -> _CodexSdkBindings:
         invalid_request_error=InvalidRequestError,
         reasoning_effort=ReasoningEffort,
         thread_unsubscribe_response=ThreadUnsubscribeResponse,
+        config_read_response=ConfigReadResponse,
     )
+
+
+def _ephemeral_text_config(codex: Any, cwd: Path, sdk: _CodexSdkBindings) -> dict[str, Any]:
+    # Config tables merge recursively: an empty mcp_servers table does not remove
+    # inherited servers. Discover their names without logging their configuration.
+    response = codex._client.request(
+        "config/read",
+        {"cwd": str(cwd), "includeLayers": False},
+        response_model=sdk.config_read_response,
+    )
+    extras = response.config.model_extra or {}
+    servers = extras.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError("Codex config/read returned an invalid MCP server map")
+    return {
+        "mcp_servers": {name: {"enabled": False} for name in servers},
+        "project_doc_max_bytes": 0,
+        "skills": {"include_instructions": False},
+        "agents": {"enabled": False},
+        "web_search": "disabled",
+        "include_permissions_instructions": False,
+        "include_apps_instructions": False,
+        "include_collaboration_mode_instructions": False,
+        "include_environment_context": False,
+        "include_environment_context_time": False,
+        "tools": {
+            "experimental_request_user_input": {"enabled": False},
+            "update_plan": {"enabled": False},
+        },
+        "features": {
+            "shell_tool": False,
+            "view_image": False,
+            "apps": False,
+            "plugins": False,
+            "multi_agent": False,
+            "multi_agent_v2": False,
+            "memories": False,
+            "hooks": False,
+        },
+    }
 
 
 def _unsubscribe_thread(codex: Any, thread_id: str, sdk: _CodexSdkBindings) -> None:

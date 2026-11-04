@@ -2,6 +2,79 @@
 
 [retrieval_embeddings.py](retrieval_embeddings.py) and [retrieval_reranker.py](retrieval_reranker.py) compare models on frozen, disposable Memory copies. [retrieval_runtime.py](retrieval_runtime.py) verifies the optional embedding backend through the actual CLI and MCP interfaces. Private inputs and raw results remain under ignored `tmp/embedding-retrieval/`.
 
+## Natural-language filtering — 2026-11-04
+
+[retrieval_filter.py](retrieval_filter.py) compares the original embedding results with a GPT-6 Luna/low reading of exactly the same candidates. It freezes a hash-checked disposable source copy and saves full before/after text and per-stage timing to an ignored private output directory. It does not change stored memories.
+
+Four actual queries from recent retrieval logs were replayed once each. Embedding retrieval was warmed separately; the filter used a fresh ephemeral Codex conversation for every query.
+
+| Query topic | Before characters | After characters | Retrieval seconds | Filter seconds | Combined seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Viewer diagnosis | 84,573 | 1,837 | 2.85 | 25.85 | 28.71 |
+| Lettering quality | 36,394 | 2,018 | 2.38 | 19.70 | 22.08 |
+| Plugin recommendations | 41,043 | 1,983 | 3.05 | 16.33 | 19.38 |
+| Video deployment | 46,900 | 2,163 | 2.49 | 22.40 | 24.89 |
+
+Manual review found useful deployment paths, user preferences, and distinctions between observed results and unverified current status retained in these outputs. Character reduction is not a completeness score: this is four cases, one run each, judged by the implementing agent. It does not establish general quality, reliable rejection of unrelated candidates, or latency percentiles. The paired measurements cover retrieval and filtering stages; they exclude the MCP wrapper, synchronization, and the final source-consistency check. A separate live MCP smoke call returned natural language successfully.
+
+Luna added 16–26 seconds. Warm connection startup and thread opening together were below one second; the first call's opening took about four seconds. Most elapsed time was recorded inside the model turn, which includes network retries as well as model work. The more detailed measurements below distinguish those costs. A separate live check confirmed the ephemeral thread was absent from active and archived native listings after close, while a persisted control thread remained readable.
+
+### Filter latency and conversation reuse
+
+[retrieval_filter_latency.py](retrieval_filter_latency.py) replays the saved query and full candidate text through the production filter, with its canonical instructions and GPT-6 Luna/low unchanged. It measures the first received answer text, SDK setup, turn completion, provider usage, reconnect errors, and thread-level warnings. Event timestamps are local observations, not exact server generation times. The final response is assembled by the same SDK collector used normally. Private traces and responses remain under the primary checkout's ignored `tmp/retrieval-filter/` directory.
+
+The Windows run used Codex CLI 0.166.0, Python SDK 0.162.1, and the existing ChatGPT login and priority service setting. All five new conversations in the fresh/reused comparison emitted reconnect errors numbered `2/5` through `5/5`, followed by the explicit warning `Falling back from WebSockets to HTTPS transport`. The CLI hides its first WebSocket retry notification; these are retry labels, not a direct count of connection attempts. The source switches transport after exhausting the retry budget: [Codex retry implementation](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/core/src/responses_retry.rs). This establishes the observed fallback sequence, not which network component caused the connection resets.
+
+Eight sequential calls compared a fresh conversation with one reused ephemeral conversation. Pair order alternated. The reused conversation received the four full requests in the order shown; its first request was still cold. Times cover the filter only, excluding embedding retrieval and the outer MCP request.
+
+| Query topic | Fresh chat seconds | Reused chat seconds | Reused chat position | Reconnect error events, fresh / reused |
+| --- | ---: | ---: | ---: | ---: |
+| Plugin recommendations | 19.71 | 17.44 | 1 | 4 / 4 |
+| Viewer diagnosis | 17.90 | 20.23 | 2 | 4 / 0 |
+| Lettering quality | 16.83 | 9.43 | 3 | 4 / 0 |
+| Video deployment | 21.67 | 10.19 | 4 | 4 / 0 |
+
+Later reused turns avoided the reconnect/fallback sequence, but one was slower than its fresh comparison. This is one sample per method and query, so neither a stable speedup nor tail latency is established. The reused conversation's reported input grew from 16,954 to 62,699 tokens; later turns reported cached input. History therefore still occupies context even when the provider caches it. No input candidates were removed and no output-length cap was added.
+
+Manual inspection found a concrete change in evidence scope: the reused lettering answer included the prior viewer task's JPG/PNG handoff failure, although its current candidate text contained neither that task ID nor that handoff detail. That detail was present in the preceding viewer request. This is evidence of history carryover, not an invented fact; it means the reused output cannot be treated as grounded exclusively in the latest candidate set. A separate three-turn fictional probe correctly followed an updated deployment record and declined to supply a path after its removal. That probe does not negate the observed carryover in the real requests or establish general isolation.
+
+The reused chat remained ephemeral. Per-turn event subscriptions closed normally; final cleanup unsubscribed the retained thread, closed its client, and removed its neutral working directory. No archive or provider ownership record was created by the experiment. Plain connection reuse with a new per-request directory failed on Windows because the retained process held that directory open; the owned directory was removed after shutdown. The harness now rejects that known-invalid mode on Windows. Conversation reuse instead keeps its empty working directory for the client's lifetime.
+
+An earlier transport diagnostic used the same custom OpenAI provider definition with WebSockets enabled and disabled. The enabled call took 21.20 seconds with four reconnect errors; the HTTPS-only call took 15.58 seconds with none. Their model turns took 17.24 and 10.64 seconds respectively; HTTPS produced 479 output tokens versus 298. This single pair supports investigating transport, but does not establish a reliable speedup. Custom provider aliases cannot copy the built-in provider's internal metadata flag, so they are not exact substitutes for the built-in provider: [provider implementation](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/model-provider-info/src/lib.rs). The broader transport comparison did not run after an automatic approval review raised a VPN-routing concern; the investigation then followed the user's requested chat-reuse comparison. No VPN, proxy, production provider, runtime, filter prompt, or memory-record settings were changed.
+
+The evidence supports investigating reuse scoped to a caller conversation, with an explicit policy for current-request evidence and renewal when the memory snapshot changes or the chat becomes idle or large. Those are proposed lifecycle changes, not implemented runtime behavior. MCP currently retains its backend/runner across calls but constructs a new Runtime and RetrievalFilter each time; ordinary one-shot CLI invocations do not retain an in-memory chat between processes.
+
+Reproduce the matched reuse comparison using the existing private baseline report:
+
+```sh
+python experiments/retrieval_filter_latency.py \
+  --from-report tmp/retrieval-filter/results.json \
+  --out tmp/retrieval-filter/latency-chat-reuse.json \
+  --case-ids plugins viewer lettering video \
+  --modes fresh-client reused-chat --baseline-calls 0 --repeats 1
+```
+
+The output path must be new and ignored by Git. Evidence files are `latency-baseline.json`, `latency-diagnostic.json`, `latency-http.json`, `latency-websocket-control.json`, `latency-http-shared.json` (failed cleanup experiment), `latency-chat-reuse.json`, and `latency-reuse-carryover.json`, with adjacent event journals. `reuse-carryover-cases.json` contains only the fictional probe records. Syntax and local fake-client checks covered output collection, client/thread reuse, deferred release, failure cleanup, and warning-reader shutdown. Production code was unchanged, so the full runtime test suite was not rerun for these experiments.
+
+### Inherited filter context
+
+The original filter passed an empty `mcp_servers` table, which Codex recursively merged with the user's configuration. A live effective-config check still found all three configured MCP servers enabled. The correction reads server names through the existing connection and explicitly disables each one for the ephemeral thread. It also disables supported optional context, delegation, and optional tools. A live status check found all three servers disabled with zero tools and resources; their inventory entries still existed.
+
+[retrieval_filter_context.py](retrieval_filter_context.py) sends a fictional query to an anonymous loopback HTTP sink that returns an intentional error without forwarding the request or invoking a model. The report records sizes, tool names, and whether an authentication header was present, without saving headers or instruction text. This inspects request construction, not exact server-side context. The sink alone uses a loopback proxy exclusion; production transport and proxy settings are unchanged.
+
+Compared with the installed implementation at `a56a755`, the corrected request shrank from 40,953 to 25,948 bytes. Both requests had an empty top-level tools list, but tool definitions also appeared inside input items. The correction removed delegation tools and instructions, permissions and environment context, and the synchronous user-input tool. The final request still contained the 8,420-character global AGENTS.md block and host definitions for `exec`, `wait`, asynchronous user input, and sleep. These retained blocks prevent claiming a fully isolated text-only request. No supported per-thread switch to omit home user instructions was established.
+
+Four subsequent model calls compared `a56a755` with the final correction, alternating pair order and replaying the same full candidate payloads. Both used GPT-6 Luna/low, fresh ephemeral conversations, the existing login, and normal transport. The earlier runner was loaded from that Git revision in memory and selected through the latency harness's runner boundary; it used the same timing observer and response collector.
+
+| Query topic | Before input tokens | After input tokens | Before seconds | After seconds |
+| --- | ---: | ---: | ---: | ---: |
+| Plugin recommendations | 16,950 | 14,164 | 20.80 | 18.81 |
+| Viewer diagnosis | 25,924 | 23,134 | 19.13 | 18.28 |
+
+The measured reduction is about 2,790 input tokens per request. This pair of samples does not establish a stable latency improvement: output lengths differed, the corrected viewer call reported 3,456 cached input tokens, and the first baseline call spent 3.65 seconds opening its thread versus roughly 0.35–0.44 seconds for the others. All four still emitted WebSocket retry events `2/5` through `5/5`. Full candidate inputs, output instructions, model, effort, and production transport were unchanged.
+
+Private evidence is in `isolation-mcp-inventory.json`, `isolation-installed-envelope.json`, `isolation-final-envelope.json`, and `isolation-final-timing.json` with its event journal. Earlier diagnostic reports include opening excerpts and remain private. The full suite ran 1,512 tests with 33 skips; four failures and two errors matched the verified base failures exactly. All 76 focused filter, CLI, and fork lifecycle tests passed after the final delegation settings were added. Syntax and whitespace checks passed.
+
 ## Integrated embedding retrieval — 2026-09-29
 
 The optional runtime backend uses Nemotron 3 Embed 1B and Jina reranker v3.5, with forty candidates and at most ten returned entries. The Windows client owns the canonical source index and incremental vector cache; the models run on L20 GPU 1 through a private SSH tunnel. The configured host is a service address, not a hard-coded server dependency.
