@@ -6,7 +6,14 @@ from unittest.mock import Mock, patch
 from rightmemory.codex_sdk import CodexSdkRunResult, CodexSdkRunner, CodexSdkTiming
 from rightmemory.config import AgentCliConfig
 from rightmemory.retrieval_filter import RetrievalFilter
-from tests.test_agent_cli import FakeSdkCodex, FakeSdkThread
+from tests.test_agent_cli import FakeSdkCodex as BaseFakeSdkCodex, FakeSdkThread
+
+
+class FakeSdkCodex(BaseFakeSdkCodex):
+    def __init__(self, threads, *, unsubscribe_error=None, servers=None, config_error=None):
+        super().__init__(threads, unsubscribe_error=unsubscribe_error)
+        response = SimpleNamespace(config=SimpleNamespace(model_extra={"mcp_servers": servers or {}}))
+        self._client = SimpleNamespace(request=Mock(return_value=response, side_effect=config_error))
 
 
 class RetrievalFilterTests(unittest.TestCase):
@@ -43,6 +50,9 @@ class RetrievalFilterTests(unittest.TestCase):
             self.assertFalse(call["config"]["skills"]["include_instructions"])
             self.assertFalse(call["config"]["features"]["shell_tool"])
             self.assertEqual(call["config"]["web_search"], "disabled")
+            self.assertEqual(client._client.request.call_args.args, (
+                "config/read", {"cwd": call["cwd"], "includeLayers": False},
+            ))
             self.assertEqual(client.resume_calls, [])
             self.assertEqual(client.unarchive_calls, [])
             self.assertEqual(client.unsubscribe_calls, [f"thread-{index}"])
@@ -51,6 +61,70 @@ class RetrievalFilterTests(unittest.TestCase):
             self.assertFalse(Path(call["cwd"]).exists())
             self.assertEqual(threads[index].run_calls[0][1]["effort"].value, "low")
         self.assertNotEqual(*directories)
+
+    def test_inherited_servers_are_disabled_without_copying_their_settings(self):
+        servers = {
+            "local.tools": {"command": "helper", "env": {"TOKEN": "synthetic-secret"}},
+            "remote": {"url": "https://example.invalid/mcp", "enabled": True},
+            "already_disabled": {"enabled": False},
+        }
+        thread = FakeSdkThread("isolated-thread")
+        client = FakeSdkCodex([thread], servers=servers)
+        runner = CodexSdkRunner(codex_factory=lambda config: client)
+        self.addCleanup(runner.close)
+
+        RetrievalFilter(self.config, runner).run("query", "evidence")
+
+        config = client.start_calls[0]["config"]
+        self.assertEqual(config["mcp_servers"], {name: {"enabled": False} for name in servers})
+        self.assertTrue(servers["remote"]["enabled"])
+        for name in (
+            "include_permissions_instructions", "include_apps_instructions",
+            "include_collaboration_mode_instructions", "include_environment_context",
+            "include_environment_context_time",
+        ):
+            self.assertFalse(config[name])
+        self.assertEqual(config["tools"], {
+            "experimental_request_user_input": {"enabled": False},
+            "update_plan": {"enabled": False},
+        })
+        self.assertFalse(config["agents"]["enabled"])
+        self.assertFalse(config["features"]["multi_agent"])
+        self.assertFalse(config["features"]["multi_agent_v2"])
+        self.assertEqual(client.start_calls[0]["sandbox"].value, "read-only")
+        self.assertEqual(client.start_calls[0]["approval_mode"].value, "deny_all")
+        self.assertEqual(thread.run_calls[0][1]["sandbox"].value, "read-only")
+        self.assertEqual(thread.run_calls[0][1]["approval_mode"].value, "deny_all")
+
+    def test_config_read_failure_closes_client_before_any_thread_starts(self):
+        client = FakeSdkCodex([], config_error=RuntimeError("config unavailable"))
+        archive_factory = Mock()
+        runner = CodexSdkRunner(
+            codex_factory=lambda config: client, archive_client_factory=archive_factory,
+        )
+        self.addCleanup(runner.close)
+        with self.assertRaisesRegex(RuntimeError, "config unavailable"):
+            RetrievalFilter(self.config, runner).run("query", "evidence")
+        self.assertEqual(client.start_calls, [])
+        self.assertEqual(client.close_calls, 1)
+        self.assertEqual(client.unsubscribe_calls, [])
+        archive_factory.assert_not_called()
+        self.assertFalse(Path(client._client.request.call_args.args[1]["cwd"]).exists())
+
+    def test_ordinary_role_does_not_read_or_override_inherited_configuration(self):
+        client = FakeSdkCodex([FakeSdkThread("ordinary-thread")], config_error=AssertionError("unexpected config read"))
+        archive_factory = Mock()
+        archive_factory.return_value.archive_threads.return_value = []
+        runner = CodexSdkRunner(
+            codex_factory=lambda config: client, archive_client_factory=archive_factory,
+        )
+        self.addCleanup(runner.close)
+        runner.run_turn(
+            prompt="query", provider_session_id=None, cwd=Path("ordinary-root"),
+            model="gpt-6-luna", reasoning_effort="low", sandbox="read-only",
+        )
+        client._client.request.assert_not_called()
+        self.assertNotIn("config", client.start_calls[0])
 
     def test_failed_or_interrupted_turn_releases_conversation_and_directory(self):
         for error in (RuntimeError("provider failed"), KeyboardInterrupt()):
