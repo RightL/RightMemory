@@ -61,6 +61,8 @@ The ordinary runtime owns source validation, sync, snapshot consistency, and a d
 
 Service availability is independent of Memory validity. Keeping an agent executor configured supplies a per-query fallback when the model service fails; the next query tries embedding again. The fallback reuses the ordinary agent retriever and its session history, so it needs no second rendering policy or persistent health state. Invalid sources, unstable snapshots, and local output limits still fail visibly. A successful search does not trigger fallback merely because its results might be irrelevant.
 
+The optional retrieval filter adds a query-specific reading step after ranking. Its natural-language output preserves useful context while leaving unrelated parts of large source files out of the handoff. Filtering is separate from curation: it neither edits stored sources nor makes pending evidence settled. Each call uses a fresh ephemeral Codex conversation with only the current query and candidates. Reusing conversation history would mix stale candidates and earlier needs into independent queries, so there is no filter session mapping or reusable prefix. Closing the per-call connection releases the in-memory thread; ordinary agent retrieval retains its own persisted-session lifecycle. Filter failures remain visible rather than returning the unfiltered payload as though filtering succeeded.
+
 ## Human-Owned Pursuit Map
 
 ### Ownership follows the kind of state
