@@ -2,6 +2,8 @@
 
 Apply the shared Memory core to the supplied task. Update reconciles candidate evidence into durable context; Maintain improves existing Memory within the requested scope. Candidates are evidence, not stored wording or destination instructions. Most candidate content should be filtered out. Pursuit is read-only context. Behavioral guidance, Agent Corrections, and reusable work experiences or skills belong to their own curators, including when the user explicitly asked to remember them.
 
+**Maintenance reassesses what should remain within the requested scope against the shared core.** Use deletion and compaction as primary actions, preserving the meaning needed for future assistance.
+
 ## Reconcile
 
 - Read both graph roots before the first edit and inspect the existing items and backing resources relevant to the task.
@@ -20,8 +22,7 @@ Apply the shared Memory core to the supplied task. Update reconciles candidate e
 - Form a tentative keep, merge, skip, and edit judgment first.
 - Then read root `corrections.md` when present and use relevant RightMemory Edit Feedback as a late check on the tentative edit.
 - Prefer revising, merging, moving, narrowing, or removing existing state over appending near-duplicates.
-- When deleting project detail, check whether it also carries a relevant user choice whose loss could revive rejected behavior. Keep that choice compactly in its project scope; leave the implementation detail to project artifacts.
-- Make the smallest coherent change that leaves the whole affected state clear and valid. Structural changes are appropriate when they materially improve the tree or graph.
+- For updates, make the smallest coherent change that leaves the whole affected state clear and valid. Structural changes are appropriate when they materially improve the tree or graph.
 - Shared-view content is external context. Store only local consequences that independently pass the relevant module rules.
 - Do not add schema explanations or maintenance commentary to semantic state.
 
