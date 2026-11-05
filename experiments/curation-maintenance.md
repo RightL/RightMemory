@@ -86,6 +86,133 @@ All three model turns again encountered Git metadata restrictions. After review,
 
 These runs test the narrow maintenance change against the installed definitions, not every earlier recording-quality change on the local branch together. They provide one paired observation per domain, not a repeatability estimate. No live memory or installation received these changes.
 
+## Complete branch definitions and collection-level maintenance
+
+The November 5 continuation tests `a4675a2`, including the branch's revised domain
+cores and its collection-level maintenance wording. The skills paragraph is:
+
+> **During maintenance, reassess related records as a collection: what useful experience should remain, and whose future work should it help?** Reorganize, merge, or delete records accordingly, preserving the context needed to understand and use what remains.
+
+Guidance and ordinary Memory use the corresponding domain purpose. This replaces
+the prior maintenance paragraph; it does not add another layer of instructions.
+The replacement also drops the explicit wording that deletion and compaction are
+primary actions. Collection-level judgment does not require weakening that priority;
+this is a material difference between the formulations, not an isolated explanation
+of the observed result.
+The same frozen semantic input, minimal scope, and Astra/xhigh configuration are
+used. Native preparation receives all branch role and reference files rather than
+replacing only the role paragraph. Installed executable behavior remains separate
+from those text definitions. This tests the combined revised prompts, not the
+isolated effect of the collection-level sentence.
+
+Before inspecting the new outputs, review selected these decisions:
+
+- Compare the handoff failures in the delegation and worker-status experiences.
+  Remove repeated explanation while preserving the distinct observations that
+  progress text, handoff validation, retries, artifact identity, and artistic
+  acceptance can disagree. The assignment-based reading and backpack scope-error
+  lessons still serve future agent-building work. No particular file arrangement
+  is required.
+- Reduce the Quad comparison's project-report ledger to useful scope, lookup, and
+  interpretation. Keep the exact comparison identifiable, distinguish fresh native
+  results from saved ZRemesher results, and leave its incoming local reference usable.
+  External project resources are unavailable, so deletion cannot rely on an
+  unverified claim that every detail is recoverable there. In guidance, remove
+  chat-by-chat permission and LiteWorker history that adds no future collaboration
+  value, while retaining meaningful user intent and the scope of actual exceptions.
+- Preserve the lettering-lesson correction, the CloudPlatform best-effort bilingual
+  result choice, and the latest H3 screening decisions. Reconcile superseded claims
+  instead of merely shortening contradictory versions. These are known risks from
+  earlier runs, not additional instructions supplied to the model.
+
+These review targets are deliberately outside model input. Size and file counts are
+supporting measurements; keeping a file is not itself a failure, and deleting it is
+not itself evidence of better memory.
+
+### Results and selected decisions
+
+All three model turns completed against identical frozen inputs. The SDK/runtime
+remained `0.163.0` with the same executable hash as the installed baseline and
+maintenance-purpose pair. Native preparation loaded the branch role and all
+applicable branch references; the private reference-command route returned the
+same captured definitions. The raw outputs are:
+
+| Domain | Initial words | Earlier maintenance-purpose candidate | Complete-branch candidate | Reduction from initial |
+| --- | ---: | ---: | ---: | ---: |
+| Work experience and skills | 21,946 | 18,435 | 19,655 | 10.4% |
+| Guidance and correction cases | 5,722 | 4,844 | 4,680 | 18.2% |
+| Ordinary Memory | 12,271 | 9,284 | 11,430 | 6.9% |
+
+The combined raw collection contains 35,765 words, 4,174 fewer than the input
+(10.45%). Nine files change, with no whole-file deletions or writes outside the
+requested domains. All 25 experience files and both skills remain. Ordinary Memory
+removes three nodes and adds two nodes plus a user-context heading, leaving its
+addressable item count unchanged. The raw combined copy validates with 264 IDs
+across ten graph files; none of the three removed IDs remains referenced.
+
+The skills pass rewrites the delegation, viewer-deployment, and H3-fine-tuning
+experiences. It explicitly identifies the delegation experience's audience as the
+application developer and preserves the goal of reducing reading for both main and
+specialists. The backpack assignment error and distinction between artifact
+validity, handoff acceptance, and artistic correctness survive. A link now connects
+the delegation handoff case to worker-status diagnosis, but their repeated
+explanation is not merged. The Quad comparison and worker-status records remain
+unchanged. Their distinct lookup and diagnosis value is real; the desired selection
+of their residual per-run detail was nevertheless not observed.
+
+Guidance removes the RTK rollback-copy episode, shortens several histories, and
+defers to maintained instructions where appropriate. It retains the enumerated
+chat-specific LiteWorker bans/re-enabling and task-continuation/merge permissions.
+Their explicit scope avoids making them universal rules, but does not establish
+that this retained history improves future assistance. The lettering removable-case
+and open-architecture correction survives without intervention, as does the
+CloudPlatform best-effort bilingual-output choice. All correction examples remain.
+
+Ordinary Memory usefully separates user context and shared development environments,
+shortens project reports, and reconciles the latest H3 screening decisions. It
+preserves the distinction between an extra-view benefit and an unconditional
+new-model improvement. Its three removed nodes are a Line2Dot diagnostic ledger, a
+general 3D-coverage check, and the construction-specialist trial summary; the latter's
+unmerged status and limited conclusion survive beside a link to its experience.
+The source-time-unit question remains explicit. Most retained project detail is
+still present.
+
+Review found two concrete defects. Moving Development Environments to `MEMORY.md`
+left guidance pointing to its former file. Both files still existed and canonical
+IDs were valid, so structural and missing-file checks did not catch this stale
+section locator. Separately, the deployment rewrite narrowed preservation of builds
+referenced by saved **tests or conversations** to conversations alone. Reviewed
+copies use the stable `development-environments` section ID and restore “tests or”.
+Raw candidates and the raw combined collection remain unchanged; both adjustments
+are recorded separately. A historical description of the worktree convention is
+less well supported than the operative instruction to follow current repository
+guidance; review records that uncertainty without treating it as a demonstrated
+behavioral regression.
+
+The root reviewed all changed ordinary Memory text, the removed-node meanings, and
+selected guidance/experience passages. A separate reviewer inspected all guidance
+changes and all three changed experience files, including their removed text.
+External project resources and downstream retrieval/task behavior were not verified.
+The two corrections improve the reviewed artifact, not the model's measured result.
+
+As in the earlier native runs, the model could not write Git metadata. After review,
+the scoped edits were committed and the supplied completion commands retried only
+inside the disposable roots. All three tasks have completed receipts. Published
+reviewed word counts are 19,657 for skills, 4,680 for guidance, and 11,430 for ordinary
+Memory: 35,767 in total, about 10.45% below the input. The two added words restore
+the saved-test preservation scope; the locator correction does not change the word
+count. Ordinary Memory matches its raw candidate exactly. Initial blocked status,
+raw candidates, reviewed adjustments, and completion receipts are retained separately.
+
+This run does **not** establish the proposed collection-level wording as an
+improvement in selection. It produces less overall reduction than the earlier
+maintenance-purpose run and leaves the targeted low-value histories largely intact,
+while preserving the previously lost lettering choice. Because both the complete
+domain cores and maintenance wording changed, their effects are not isolated; one
+run per domain also leaves model variability unresolved. The evidence supports
+keeping this as a local experiment, rather than presenting it as a solved cleanup
+policy or automatically applying its output to live Memory.
+
 ## Enhanced-prompt results
 
 The initial three Astra runs completed. Each passed the canonical graph validator and changed only its permitted domain. Across the three domains, stored text fell from 39,939 to 18,075 whitespace-separated words, a 54.7% reduction. This measures stored volume, not the percentage of memory that was useless.
@@ -142,6 +269,20 @@ rightmemory curate --root <disposable-root> begin `
 Delegate the returned native instructions to Astra at xhigh within that copy, using the returned completion command only for the disposable root. Retain the native manifest, exact generated prompt, before/after inventories, completion receipt, and any unfinished candidate. Private outputs use the `maintenance-<domain>-astra-installed-minimal` names.
 
 For the paired purpose experiment, start again from the identical frozen state and same minimal request. Apply only the maintained maintenance paragraph and update-only smallest-change wording to the role portion of the generated native instructions. Keep the installed shared references and native control text unchanged. Save `prompt-original.txt`, `prompt.txt`, `effective-role.md`, and `role-patch.diff`; normalize only root paths and task IDs when comparing the original generated prompt to its baseline. Private output names are `maintenance-<domain>-astra-maintain-purpose`. The private orchestration script, full model outputs, inventories and audit files are retained with the experiment evidence.
+
+For `maintenance-<domain>-astra-collection-full`, prepare from the unchanged skills
+baseline's retained candidate, verifying every file against its original inventory
+and the common frozen-state hash. The private `maintenance_native_runner.py`
+accepts `<domain> collection-full --prepare --prompt-revision a4675a2`, followed by
+`<domain> collection-full` to run the model. Use the installed interpreter in
+isolated mode. Preparation refuses existing output/root paths, captures all branch
+prompt/reference files, and overlays both native prompt readers for `curate begin`.
+A private root-local command shim serves the same captured definitions for
+`rightmemory reference`; other commands use the installed entrypoint unchanged.
+Neither the installation nor live Memory is modified. Native task instructions,
+loaded source hashes, reference-command checks, frozen root instructions, and model
+configuration are retained with the output. The selected semantic review cases are
+not part of model input.
 
 For the enhanced variant, create an ignored private JSON input with an `input` object containing `domain`, `mode: "maintain"`, the additional cleanup `scope`, and `candidates: []`. This is a synthetic experiment request, not a historical execution record. Use a new output directory per run:
 
