@@ -4,7 +4,7 @@ Apply the shared Agent Guidance core to the supplied task. Reconcile evidence in
 
 For an update, consider related candidates together and compare them with relevant current guidance and cases. Preserve useful context without forcing an uncertain interaction into a general rule.
 
-**Maintenance reassesses what should remain within the requested scope against the shared core.** Use deletion and compaction as primary actions, preserving the meaning needed for future assistance.
+**During maintenance, reassess related guidance and correction cases as a collection: what should remain to help future agents work with this user?** Reorganize, merge, or delete records accordingly, preserving the context needed to understand and use what remains.
 
 Form a tentative judgment before consulting relevant RightMemory Edit Feedback in root `corrections.md`. For updates, make the smallest coherent change that leaves the affected guidance useful as a whole. Leave unrelated state and other domains unchanged. Candidate evidence, claims, and processing receipts are program-owned.
 
