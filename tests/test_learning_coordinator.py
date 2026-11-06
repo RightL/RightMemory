@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rightmemory.config import SyncConfig
+from rightmemory.curation_budget import CurationBudgetExceededError
 from rightmemory.learning import (
     LEARNING_DOMAINS, learning_claims, list_learning_candidates, submit_learning,
     learning_batch_candidate_ids,
@@ -118,6 +119,13 @@ class LocalLearningCoordinatorTests(IsolatedWriteTestBase):
     def _complete(self, coordinator, claim):
         return coordinator.finalize(claim, None, prepared_start_commit=self._git("rev-parse", "HEAD"))
 
+    def _set_token_limits(self, *, memory=80, guidance=80, skills=80):
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.batch]\ntrigger_candidates = 1\ntarget_batch_candidates = 20\n"
+            f"[curation.token_limits]\nmemory = {memory}\nguidance = {guidance}\nskills = {skills}\n",
+            encoding="utf-8",
+        )
+
     def _prepared(self, role, relative, text):
         base = self._git("rev-parse", "HEAD")
         worktree = Path(self.tempdir.name).parent / ("prepared-" + self.root.name)
@@ -125,7 +133,7 @@ class LocalLearningCoordinatorTests(IsolatedWriteTestBase):
         try:
             path = worktree / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
+            path.write_text(text, encoding="utf-8")
             self._git("add", "-f", "--", relative, cwd=worktree)
             self._git("commit", "-m", role + ": prepared", cwd=worktree)
             return base, self._git("rev-parse", "HEAD", cwd=worktree)
@@ -189,6 +197,77 @@ class LocalLearningCoordinatorTests(IsolatedWriteTestBase):
         self.assertEqual(self._git("rev-parse", "HEAD"), landed)
         self.assertIn("retained context", (self.root / "MEMORY.md").read_text())
         self.assertEqual(list_learning_candidates(self.root, domain="memory"), ())
+
+    def test_over_budget_finalization_preserves_claim_evidence_and_same_task_retry(self):
+        self._set_token_limits()
+        candidate_id = self._submit()
+        coordinator = self._coordinator()
+        cases = (
+            ("memory", "update", "MEMORY.md", "# Memory\n\n- `retained` {} → []\n"),
+            ("guidance", "guidance-curator", "learning/guidance/working.md", "# Working guidance\n\n{}\n"),
+            ("skills", "skills-curator", "learning/skills/review/SKILL.md", "# Review\n\n{}\n"),
+        )
+        for domain, role, relative, template in cases:
+            with self.subTest(domain=domain):
+                claim = coordinator.claim(domain).claim
+                base, prepared = self._prepared(role, relative, template.format("retained context " * 1000))
+                source = self.root / "learning/candidates" / f"{candidate_id}.json"
+                original_evidence = source.read_bytes()
+                admitted = learning_batch_candidate_ids(self.root, domain)
+                with self.assertRaises(CurationBudgetExceededError):
+                    coordinator.finalize(claim, prepared, prepared_start_commit=base)
+                self.assertEqual(self._git("rev-parse", "HEAD"), base)
+                self.assertEqual(coordinator.current_claim(domain), claim)
+                self.assertEqual(source.read_bytes(), original_evidence)
+                self.assertEqual(learning_batch_candidate_ids(self.root, domain), admitted)
+                self.assertEqual(tuple(item.candidate_id for item in list_learning_candidates(self.root, domain=domain)),
+                                 (candidate_id,))
+                self.assertFalse((self.root / f"learning/processed/{domain}/{candidate_id}.json").exists())
+
+                corrected_base, corrected = self._prepared(role, relative, template.format("Useful retained context."))
+                self.assertEqual(corrected_base, base)
+                coordinator.finalize(claim, corrected, prepared_start_commit=base)
+                self.assertIsNone(coordinator.current_claim(domain))
+                self.assertEqual(list_learning_candidates(self.root, domain=domain), ())
+
+    def test_finalization_rechecks_current_active_root_budget_after_preparation(self):
+        self._set_token_limits(memory=10000)
+        candidate_id = self._submit()
+        coordinator = self._coordinator()
+        claim = coordinator.claim("memory").claim
+        base, prepared = self._prepared(
+            "update", "MEMORY.md", "# Memory\n\n- `retained` " + "context " * 1000 + " → []\n",
+        )
+        self._set_token_limits(memory=80)
+        with self.assertRaises(CurationBudgetExceededError):
+            coordinator.finalize(claim, prepared, prepared_start_commit=base)
+        self.assertEqual(self._git("rev-parse", "HEAD"), base)
+        self.assertEqual(coordinator.current_claim("memory"), claim)
+        self.assertEqual(tuple(item.candidate_id for item in list_learning_candidates(self.root, domain="memory")),
+                         (candidate_id,))
+
+        self._set_token_limits(memory=10000)
+        landed = coordinator.finalize(claim, prepared, prepared_start_commit=base)
+        self.assertEqual(self._git("rev-parse", "HEAD"), landed)
+        self.assertEqual(list_learning_candidates(self.root, domain="memory"), ())
+
+    def test_no_change_finalization_checks_only_its_domain_budget(self):
+        self._set_token_limits(memory=1)
+        candidate_id = self._submit()
+        coordinator = self._coordinator()
+        memory_claim = coordinator.claim("memory").claim
+        base = self._git("rev-parse", "HEAD")
+        with self.assertRaises(CurationBudgetExceededError):
+            coordinator.finalize(memory_claim, None, prepared_start_commit=base)
+        self.assertEqual(self._git("rev-parse", "HEAD"), base)
+        self.assertEqual(coordinator.current_claim("memory"), memory_claim)
+        guidance_claim = coordinator.claim("guidance").claim
+        self._complete(coordinator, guidance_claim)
+        self.assertEqual(list_learning_candidates(self.root, domain="guidance"), ())
+        self.assertEqual(tuple(item.candidate_id for item in list_learning_candidates(self.root, domain="memory")),
+                         (candidate_id,))
+        self.assertEqual(coordinator.current_claim("memory"), memory_claim)
+        self.assertFalse((self.root / f"learning/processed/memory/{candidate_id}.json").exists())
 
     def test_changed_domain_context_refuses_stale_prepared_judgment(self):
         self._submit()

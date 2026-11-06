@@ -45,6 +45,7 @@ class RuntimeStateRootTests(unittest.TestCase):
             AgentCliConfig(provider="codex"),
             codex_runner=runtime._codex_runner,
             state_root=state_root,
+            curation_config_root=state_root,
             fresh_provider_session=False,
             trace_event=runtime._trace,
         )

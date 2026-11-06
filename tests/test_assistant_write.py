@@ -4,9 +4,11 @@ import unittest
 from unittest.mock import patch
 
 from rightmemory.assistant_write import AssistantStaleVersionError, AssistantWriteManager
+from rightmemory.curation_budget import CurationBudgetExceededError
 from rightmemory.isolated_write import IsolatedWriteSupervisor, MemoryVersionConflictError
 from rightmemory.learning import list_learning_candidates, submit_learning
 from rightmemory.semantic_operation import SemanticOperationStore
+from rightmemory.tools import MemoryTools
 from tests.isolated_write_test_base import IsolatedWriteTestBase
 
 
@@ -151,6 +153,58 @@ class AssistantWriteTests(IsolatedWriteTestBase):
         result = self._complete(task.task_id, output="corrected attempt")
         self.assertEqual(result.output, "corrected attempt")
         self.assertIn("native assistant edit", (self.root / "MEMORY.md").read_text())
+
+    def test_over_budget_candidate_can_be_corrected_in_the_same_task(self):
+        (self.root / ".git/info").mkdir(parents=True, exist_ok=True)
+        (self.root / ".git/info/exclude").write_text("/rightmemory.toml\n", encoding="utf-8")
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.token_limits]\nmemory = 80\nguidance = 80\nskills = 80\n",
+            encoding="utf-8",
+        )
+        cases = (
+            ("memory", "update", "MEMORY.md", "# Memory\n\n- `retained` {} → []\n"),
+            ("guidance", "guidance-curator", "learning/guidance/working.md", "# Working guidance\n\n{}\n"),
+            ("skills", "skills-curator", "learning/skills/review/SKILL.md", "# Review\n\n{}\n"),
+        )
+        for domain, role, relative, template in cases:
+            with self.subTest(domain=domain):
+                manager = AssistantWriteManager(self.root, role=role)
+                task = manager.prepare("budget-" + domain, {**self.input_data, "domain": domain})
+                head = self._git("rev-parse", "HEAD")
+                path = task.worktree / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(template.format("retained context " * 1000), encoding="utf-8")
+                self._git("add", relative, cwd=task.worktree)
+                self._git("commit", "-m", "oversized retained state", cwd=task.worktree)
+
+                with self.assertRaises(CurationBudgetExceededError):
+                    self._complete(task.task_id, output="oversized attempt", manager=manager)
+                self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self.assertIsNone(manager.read(task.task_id).source_commit)
+                self.assertEqual(SemanticOperationStore(self.root).read(task.operation_id).phase, "running")
+                self.assertTrue(task.worktree.is_dir())
+
+                path.write_text(template.format("Useful retained context."), encoding="utf-8")
+                self._git("add", relative, cwd=task.worktree)
+                self._git("commit", "-m", "fit retained state to its budget", cwd=task.worktree)
+                result = self._complete(task.task_id, output="corrected attempt", manager=manager)
+                self.assertEqual(result.output, "corrected attempt")
+                self.assertEqual(result.commits_landed, 1)
+                self.assertEqual((self.root / relative).read_bytes(), path.read_bytes())
+
+    def test_no_change_cannot_acknowledge_over_budget_memory_but_state_remains_readable(self):
+        (self.root / ".git/info").mkdir(parents=True, exist_ok=True)
+        (self.root / ".git/info/exclude").write_text("/rightmemory.toml\n", encoding="utf-8")
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.token_limits]\nmemory = 1\n", encoding="utf-8",
+        )
+        self.assertFalse(MemoryTools(self.root).validate_memory().startswith("validation failed:"))
+        task = self._prepare()
+        with self.assertRaises(CurationBudgetExceededError):
+            self._complete(task.task_id)
+        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
+        self.assertIsNone(self.manager.read(task.task_id).source_commit)
+        self.assertEqual(SemanticOperationStore(self.root).read(task.operation_id).phase, "running")
 
     def test_stale_semantic_base_does_not_overwrite_new_memory(self):
         task = self._prepare()

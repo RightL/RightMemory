@@ -53,6 +53,7 @@ Delegate a newly claimed task with its `instructions_file`, `candidates_file`, a
 ```bash
 rightmemory curate --root /absolute/memory-root complete --task TASK
 rightmemory curate --root /absolute/memory-root status --task TASK
+rightmemory curate --root /absolute/memory-root count --domain memory --task TASK
 ```
 
 `--output-file FILE` can attach the agent's summary. A worktree commit is candidate work; the completion receipt establishes publication. An unchanged reconciliation still completes processing. Updates use bounded batches, with remaining candidates available to subsequent tasks.
@@ -112,6 +113,6 @@ The optional native MCP transport wraps the same controls:
 rightmemory assistant --root /absolute/memory-root mcp --transport stdio
 ```
 
-Keep the shared assistant skill active with this transport. Its curation tools are `rightmemory_submit`, `rightmemory_begin_curation`, `rightmemory_complete_curation`, `rightmemory_curation_status`, and `rightmemory_withdraw_candidate`. Responses retain readiness and active-task notices because the assistant coordinates native workers. Ordinary `rightmemory mcp` exposes only retrieval and submission. Manual configured execution uses `rightmemory curate run`; neither MCP transport exposes that control. The maintenance skills continue to use the CLI. See [MCP](MCP.md).
+Keep the shared assistant skill active with this transport. Its curation tools are `rightmemory_submit`, `rightmemory_begin_curation`, `rightmemory_complete_curation`, `rightmemory_curation_status`, `rightmemory_count_curation_tokens`, and `rightmemory_withdraw_candidate`. The count tool takes a domain and an optional task ID; completion enforces that domain's [retained-text limit](../README.md#curation-execution-and-recovery). Responses retain readiness and active-task notices because the assistant coordinates native workers. Ordinary `rightmemory mcp` exposes only retrieval and submission. Manual configured execution uses `rightmemory curate run`; neither MCP transport exposes that control. The maintenance skills continue to use the CLI. See [MCP](MCP.md).
 
 Native execution covers retrieval and all three curation domains. Internal model history, incremental retrieval caching, Insight, and Pruner remain capabilities of the configured runtime; native task preparation does not claim those behaviors.

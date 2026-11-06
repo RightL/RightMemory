@@ -66,10 +66,12 @@ class CliAgentExecutor:
         fresh_provider_session: bool = False,
         codex_runner: CodexSdkRunner | None = None,
         trace_event: Callable[..., None] | None = None,
+        curation_config_root: Path | None = None,
     ):
         _validate_role(role)
         self.memory_root = memory_root
         self.state_root = state_root if state_root is not None else memory_root
+        self.curation_config_root = curation_config_root or self.state_root
         self.role = role
         self.config = config
         self.fresh_provider_session = fresh_provider_session
@@ -360,6 +362,7 @@ class CliAgentExecutor:
             self.role,
             message,
             include_instructions=not resume,
+            curation_config_root=self.curation_config_root,
         )
         created_at = _now()
         if self.config.provider == "codex":
@@ -722,11 +725,30 @@ def _turn_prompt(
     message: str,
     *,
     include_instructions: bool = True,
+    curation_config_root: Path | None = None,
 ) -> str:
     caller = f"Caller message:\n{message}\n"
     if not include_instructions:
         return caller
     instructions = build_cli_agent_instructions(memory_root, role).rstrip()
+    from .learning import DOMAIN_ROLES
+
+    domain = next((key for key, curator_role in DOMAIN_ROLES.items() if role == curator_role), None)
+    if domain is not None:
+        from .curation_budget import domain_budget
+        import shlex
+
+        config_root = curation_config_root or memory_root
+        budget = domain_budget(memory_root, domain, state_root=config_root)
+        command = shlex.join([
+            "rightmemory", "curate", "--root", str(memory_root), "count", "--domain", domain,
+            "--config-root", str(config_root),
+        ])
+        instructions += (
+            f"\n\nRetained-text budget for {domain}: {budget['retained_text_tokens']:,} of "
+            f"{budget['token_limit']:,} {budget['encoding']} tokens. "
+            f"Recount edited state with {command}."
+        )
     return f"{instructions}\n\n{caller}"
 
 
