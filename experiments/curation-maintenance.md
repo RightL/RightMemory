@@ -213,6 +213,16 @@ run per domain also leaves model variability unresolved. The evidence supports
 keeping this as a local experiment, rather than presenting it as a solved cleanup
 policy or automatically applying its output to live Memory.
 
+### Subsequent wording correction — November 6
+
+After the user challenged the dropped deletion priority, the three role prompts
+restored **deletion and compaction as primary actions**, retaining the collection-level
+judgment. The experience rules and submission description now compare added value
+against what the acting agent itself can work out, do, or readily discover, rather
+than a hypothetical capable agent. These corrections have not been replayed. The
+results above remain measurements of `a4675a2`; no retained-memory token budget was
+implemented as part of this correction.
+
 ## Enhanced-prompt results
 
 The initial three Astra runs completed. Each passed the canonical graph validator and changed only its permitted domain. Across the three domains, stored text fell from 39,939 to 18,075 whitespace-separated words, a 54.7% reduction. This measures stored volume, not the percentage of memory that was useless.

@@ -18,8 +18,8 @@ its existing history.
 Update and Maintain share the same domain intent and publication boundary. Update
 starts from a bounded candidate batch. Maintain reassesses related records as a
 collection within the requested scope, deciding what should remain and whose future
-work it helps. Reorganization, merging, and deletion preserve useful meaning without
-treating existing record boundaries as fixed. The domain's learning purpose remains
+work it helps. Deletion and compaction are primary actions, preserving useful meaning
+without treating existing record boundaries as fixed. The domain's learning purpose remains
 the same. Maintenance does not consume pending evidence.
 The program owns claims, processing records, withdrawal, and cleanup; models judge
 and edit curated content.
