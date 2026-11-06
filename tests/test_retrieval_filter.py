@@ -10,9 +10,9 @@ from tests.test_agent_cli import FakeSdkCodex as BaseFakeSdkCodex, FakeSdkThread
 
 
 class FakeSdkCodex(BaseFakeSdkCodex):
-    def __init__(self, threads, *, unsubscribe_error=None, servers=None, config_error=None):
+    def __init__(self, threads, *, unsubscribe_error=None, config=None, config_error=None):
         super().__init__(threads, unsubscribe_error=unsubscribe_error)
-        response = SimpleNamespace(config=SimpleNamespace(model_extra={"mcp_servers": servers or {}}))
+        response = SimpleNamespace(config=SimpleNamespace(model_extra=config))
         self._client = SimpleNamespace(request=Mock(return_value=response, side_effect=config_error))
 
 
@@ -69,7 +69,7 @@ class RetrievalFilterTests(unittest.TestCase):
             "already_disabled": {"enabled": False},
         }
         thread = FakeSdkThread("isolated-thread")
-        client = FakeSdkCodex([thread], servers=servers)
+        client = FakeSdkCodex([thread], config={"mcp_servers": servers})
         runner = CodexSdkRunner(codex_factory=lambda config: client)
         self.addCleanup(runner.close)
 
@@ -95,6 +95,45 @@ class RetrievalFilterTests(unittest.TestCase):
         self.assertEqual(client.start_calls[0]["approval_mode"].value, "deny_all")
         self.assertEqual(thread.run_calls[0][1]["sandbox"].value, "read-only")
         self.assertEqual(thread.run_calls[0][1]["approval_mode"].value, "deny_all")
+
+    def test_filter_preserves_inherited_features_and_applies_its_overrides(self):
+        disabled = dict.fromkeys((
+            "shell_tool", "view_image", "apps", "plugins", "multi_agent",
+            "multi_agent_v2", "memories", "hooks",
+        ), False)
+        enabled = dict.fromkeys(disabled, True)
+        for proxy in ({"respect_system_proxy": True}, {"respect_system_proxy": False}, {}):
+            with self.subTest(proxy=proxy):
+                inherited = {
+                    **proxy,
+                    "structured_feature": {"enabled": True, "options": {"values": ["example"]}},
+                }
+                configured = {**inherited, **enabled, "network_proxy": None}
+                client = FakeSdkCodex(
+                    [FakeSdkThread("isolated-thread")], config={"features": configured},
+                )
+                runner = CodexSdkRunner(codex_factory=lambda config: client)
+                self.addCleanup(runner.close)
+
+                RetrievalFilter(self.config, runner).run("query", "evidence")
+
+                self.assertEqual(
+                    client.start_calls[0]["config"]["features"], {**inherited, **disabled},
+                )
+                self.assertEqual(configured, {**inherited, **enabled, "network_proxy": None})
+
+    def test_invalid_inherited_features_prevent_thread_start(self):
+        for features in (None, False, ["respect_system_proxy"]):
+            with self.subTest(features=features):
+                client = FakeSdkCodex([], config={"features": features})
+                runner = CodexSdkRunner(codex_factory=lambda config: client)
+                self.addCleanup(runner.close)
+
+                with self.assertRaisesRegex(RuntimeError, "invalid features map"):
+                    RetrievalFilter(self.config, runner).run("query", "evidence")
+
+                self.assertEqual(client.start_calls, [])
+                self.assertEqual(client.close_calls, 1)
 
     def test_config_read_failure_closes_client_before_any_thread_starts(self):
         client = FakeSdkCodex([], config_error=RuntimeError("config unavailable"))
