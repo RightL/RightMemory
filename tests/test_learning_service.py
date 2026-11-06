@@ -213,6 +213,33 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertEqual(payload["candidates"][0]["candidate_id"], candidate_id)
         self.assertTrue(Path(task["instructions_file"]).is_file())
 
+    def test_native_budget_counts_edited_worktree_with_active_root_limit(self):
+        with (self.root / "rightmemory.toml").open("a", encoding="utf-8") as handle:
+            handle.write("\n[curation.token_limits]\nguidance = 20\n")
+        self._submit()
+        active = self.service.count("guidance")
+        with patch("rightmemory.config.load_config", side_effect=AssertionError("model config loaded")):
+            task = self.service.begin("guidance")
+        worktree = Path(task["worktree"])
+        self.assertFalse((worktree / "rightmemory.toml").exists())
+        self.assertEqual(task["token_budget"]["token_limit"], 20)
+        self.assertEqual(task["token_budget"]["retained_text_tokens"], active["retained_text_tokens"])
+        self.assertEqual(task["count_argv"], [
+            "rightmemory", "curate", "--root", str(self.root), "count",
+            "--domain", "guidance", "--task", task["task_id"],
+        ])
+
+        edit = worktree / "learning/guidance/work.md"
+        edit.parent.mkdir(parents=True, exist_ok=True)
+        edit.write_text("# Guidance\n\n" + "example " * 30, encoding="utf-8")
+        before = self._git("status", "--porcelain", cwd=worktree)
+        count = self.service.count("guidance", task["task_id"])
+        self.assertEqual(count["token_limit"], 20)
+        self.assertTrue(count["over_limit"])
+        self.assertIn("learning/guidance/work.md", count["tokens_by_text_file"])
+        self.assertEqual(self.service.count("guidance"), active)
+        self.assertEqual(self._git("status", "--porcelain", cwd=worktree), before)
+
     def test_domains_complete_independently_and_last_completion_retires_raw(self):
         candidate_id = self._submit()
         guidance = self.service.begin("guidance")

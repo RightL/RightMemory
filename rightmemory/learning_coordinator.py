@@ -10,10 +10,11 @@ from pathlib import Path
 
 from .config import SyncConfig, load_curation_batch_config
 from .curation_batch import select_curation_batch
+from .curation_budget import require_domain_budget
 from .git_storage import git, git_result, require_repository_root
 from .isolated_write import IsolatedWriteSupervisor
 from .learning import (
-    LEARNING_DOMAINS, LearningCandidate, LearningClaim, learning_claims,
+    DOMAIN_ROLES, LEARNING_DOMAINS, LearningCandidate, LearningClaim, learning_claims,
     learning_validation_errors, list_learning_candidates, parse_learning_claim,
     record_learning_processed, remove_learning_claim, withdraw_learning_candidate,
     write_learning_claim,
@@ -206,7 +207,7 @@ class LearningCoordinator:
                 with self._worktree(base) as worktree:
                     self._require_claim(worktree, claim)
                     self._check_semantic_base(claim, prepared_start_commit, base)
-                    role = "update" if claim.domain == "memory" else f"{claim.domain}-curator"
+                    role = DOMAIN_ROLES[claim.domain]
                     if candidate_commit is not None:
                         parents = git(self.memory_root, "rev-list", "--parents", "-n", "1", candidate_commit).split()
                         if parents != [candidate_commit, prepared_start_commit]:
@@ -218,6 +219,7 @@ class LearningCoordinator:
                             git_result(worktree, "cherry-pick", "--abort")
                             raise LearningSemanticBaseChanged("prepared result no longer applies to domain state")
                         supervisor._validate_commits(worktree, [git(worktree, "rev-parse", "HEAD")])
+                    require_domain_budget(worktree, claim.domain, state_root=self.memory_root)
                     paths = [remove_learning_claim(worktree, claim)]
                     if claim.mode == "update":
                         paths.extend(record_learning_processed(worktree, claim.domain, claim.candidate_ids))

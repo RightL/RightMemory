@@ -15,9 +15,10 @@ from .assistant_write import AssistantStaleVersionError, AssistantWriteManager
 from .automatic_effects import replay_memory_operation_effects
 from .config import load_sync_config
 from .curation_batch import select_curation_batch
+from .curation_budget import domain_budget
 from .isolated_write import WorktreeLease
 from .learning import (
-    LEARNING_DOMAINS, LearningCandidate, LearningClaim, learning_claims,
+    DOMAIN_ROLES, LEARNING_DOMAINS, LearningCandidate, LearningClaim, learning_claims,
     learning_batch_candidate_ids, list_learning_candidates, parse_learning_claim, submit_learning,
 )
 from .learning_coordinator import (
@@ -27,9 +28,6 @@ from .platform import lock_file, unlock_file
 from .semantic_operation import FINAL_PHASES, SemanticOperationStore
 from .session import _ensure_durable_directory, _ensure_runtime_gitignore, _fsync_directory
 from .sync import SyncManager
-
-
-DOMAIN_ROLES = {"memory": "update", "guidance": "guidance-curator", "skills": "skills-curator"}
 
 
 class LearningService:
@@ -62,6 +60,23 @@ class LearningService:
     def withdraw(self, candidate_id: str) -> dict[str, Any]:
         status = self.coordinator.withdraw(candidate_id)
         return self._response({"candidate_id": candidate_id, "status": status})
+
+    def count(self, domain: str, task_id: str | None = None) -> dict[str, Any]:
+        """Count retained text in the active root or an existing task worktree."""
+        _validate_domain(domain)
+        source = self.memory_root
+        if task_id is not None:
+            record = self._task(task_id)
+            if record["domain"] != domain:
+                raise ValueError("curator task belongs to a different domain")
+            writer = self._writer(domain)
+            task = writer.read(task_id)
+            writer._verify_worktree(task)
+            source = task.worktree
+        return {
+            "ok": True, "active_root": str(self.memory_root), "task_id": task_id,
+            **domain_budget(source, domain, state_root=self.memory_root),
+        }
 
     def begin(
         self, domain: str, *, mode: str = "update", scope: str = "", retry_task: str | None = None,
@@ -337,18 +352,23 @@ class LearningService:
     def _prepare(self, record: dict, *, claimed: bool) -> dict[str, Any]:
         from .prompt import build_cli_agent_instructions
 
-        task = self._writer(record["domain"]).prepare(
+        domain = record["domain"]
+        task = self._writer(domain).prepare(
             record["task_id"], record["input"], check_current=lambda: self._check_current(record),
         )
         directory = self.root / "tasks" / record["task_id"]
         candidates_file = directory / "candidates.json"
         instructions_file = directory / "instructions.md"
         self._write(candidates_file, record["input"])
-        canonical = build_cli_agent_instructions(task.worktree, DOMAIN_ROLES[record["domain"]])
+        canonical = build_cli_agent_instructions(task.worktree, DOMAIN_ROLES[domain])
+        budget = domain_budget(task.worktree, domain, state_root=self.memory_root)
+        count = self._argv("count", "--domain", domain, "--task", task.task_id)
         complete = self._argv("complete", "--task", task.task_id)
         status = self._argv("status", "--task", task.task_id)
         instructions = (
             f"{canonical}\n\n{_curation_input(record['input'])}\n\n"
+            f"Retained text uses {budget['retained_text_tokens']} of {budget['token_limit']} tokens. "
+            f"Recount the edited worktree with `{shlex.join(count)}`.\n\n"
             f"Native task {task.task_id}: edit and commit only allowed files in {task.worktree}. "
             f"Read the frozen candidate manifest from {candidates_file}. "
             "Source_file paths are relative to the candidate worktree; read their decoded evidence "
@@ -364,11 +384,12 @@ class LearningService:
         instructions_file.write_text(instructions, encoding="utf-8")
         return {
             "status": "prepared", "claimed": claimed, "task_id": task.task_id,
-            "domain": record["domain"], "executor": record["executor"],
+            "domain": domain, "executor": record["executor"],
             "mode": record["input"]["mode"], "scope": record["input"]["scope"],
             "selected_candidate_count": len(record["input"]["candidates"]),
             "worktree": str(task.worktree), "instructions_file": str(instructions_file),
             "candidates_file": str(candidates_file), "complete_argv": complete, "status_argv": status,
+            "token_budget": budget, "count_argv": count,
         }
 
     def _complete(self, record: dict, output: str = "") -> dict[str, Any]:

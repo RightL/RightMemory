@@ -24,6 +24,24 @@ the same. Maintenance does not consume pending evidence.
 The program owns claims, processing records, withdrawal, and cleanup; models judge
 and edit curated content.
 
+Retained text has separate ceilings for ordinary Memory (16,000 tokens), guidance
+and correction cases (4,000), and experiences and skills (24,000). Guidance has the
+smallest allowance because broadly applied behavioral instructions should stay
+selective; ordinary context needs more room for distinct circumstances; reusable
+work cases and supporting resources need the most. These are adjustable starting
+limits, not measured optima. Sharing one pool would let one domain's growth crowd
+out another purpose. Spare capacity does not make low-value content worth retaining.
+
+The program measures complete domain-owned text with one bundled, pinned tokenizer
+and enforces the configured ceiling at publication. Models still decide what to
+delete or compact while preserving useful meaning and the requested scope. A cap
+cannot establish semantic quality or authorize broader edits. Counting includes
+unreferenced files and skill text resources so moving text into a backing file does
+not evade the limit; binary resources are reported separately. The active root owns
+the settings while isolated worktrees supply the text being measured. Caps are not
+graph validity rules: an oversized root remains readable, and an over-limit result
+cannot publish or consume its evidence, without blocking other domains' work.
+
 Batch readiness and batch size serve separate purposes. Count and waiting-time
 triggers let related evidence accumulate and reduce repeated model work; size bounds
 limit each run. A shared batch record retains the evidence admitted by a trigger until

@@ -4,6 +4,8 @@ Apply the shared Memory core to the supplied task. Update reconciles candidate e
 
 **During maintenance, reassess related Memory items as a collection: what durable context should remain to help future assistance?** **Use deletion and compaction as primary actions**, preserving the context needed to understand and use what remains.
 
+**Keep this domain within its supplied retained-text token limit, and recount edited state before finishing.** The limit is a ceiling, not a target or a reason to retain weak material. Delete or compact lower-value content within the task's scope; if meeting the limit requires broader changes or losing useful meaning, report that instead of declaring completion.
+
 ## Reconcile
 
 - Read both graph roots before the first edit and inspect the existing items and backing resources relevant to the task.

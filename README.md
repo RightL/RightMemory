@@ -497,8 +497,10 @@ Every executor uses the same submission and curation lifecycle. `curate begin` p
 rightmemory retrieve --session <agent-session-id> "find memory about the standalone mode"
 rightmemory submit --root <memory-root> --session <agent-session-id> --request-id <id> --file <evidence.txt>
 rightmemory curate --root <memory-root> status
+rightmemory curate --root <memory-root> count --domain guidance
 rightmemory curate --root <memory-root> run --domain memory --mode update
 rightmemory curate --root <memory-root> begin --domain skills --mode maintain --scope "improve the report workflow"
+rightmemory curate --root <memory-root> count --domain skills --task <task-id>
 rightmemory curate --root <memory-root> complete --task <task-id>
 rightmemory curate --root <memory-root> begin --domain skills --retry <task-id>
 rightmemory curate --root <memory-root> withdraw --candidate <candidate-id>
@@ -568,6 +570,51 @@ The runtime is intentionally small:
 - The local [MCP stdio adapter](docs/MCP.md) exposes retrieval and submission through the same runtime and shared candidate store as the CLI. Native assistant MCP also exposes model-free curation controls for worker coordination; manual configured execution uses `rightmemory curate run`.
 
 ### Curation Execution and Recovery
+
+Each domain has an independent retained-text ceiling. Defaults can be overridden
+with positive integers in `rightmemory.toml`:
+
+```toml
+[curation.token_limits]
+memory = 16000
+guidance = 4000
+skills = 24000
+```
+
+Unused capacity does not transfer between domains. These limits bound growth; they
+are not targets to fill or reasons to retain weak material below the ceiling.
+Curators use deletion and compaction to keep useful meaning within their assigned
+limit. If the requested scope is too narrow to make enough room safely, the task
+reports the need for broader maintenance rather than silently discarding context.
+
+`curate count --domain <domain>` reports the total, limit, remaining capacity,
+per-file counts, and binary assets. Add `--task <task-id>` to measure that task's
+edited worktree against the active root's settings. Native assistant MCP exposes
+the same operation as `rightmemory_count_curation_tokens`; standalone curators
+receive `count_curation_tokens`. CLI-agent instructions supply a count command
+with `--config-root <active-root>` when content and configuration live separately.
+Counting is read-only and makes no model call.
+
+The count covers all text in the domain's writable files, including untracked edits
+and unreferenced backing files: ordinary Memory documents; guidance and its two
+correction collections; or experiences, skill documents, and text resources inside
+skill packages. Pending evidence, Pursuits, history, and root runtime state are
+outside these totals. Recognized binary assets are reported by path and byte size
+instead of charged as text. Owned links, unreadable files, and unsupported non-UTF-8
+files fail counting rather than silently disappearing from the total.
+
+The fixed counting unit is `o200k_base` from `tiktoken==0.13.0`, with its encoding
+data bundled for offline use. Files are encoded separately as UTF-8 text after
+normalizing line endings; markup and special-token-looking strings count as ordinary
+text. This is a stable storage measure, not a claim about any model's exact prompt
+usage or the quality of retained content.
+
+Completion checks the assigned domain's limit before publishing, including updates,
+maintenance, no-change judgments, and recovered prepared results. An over-limit
+result preserves active state and pending evidence. An existing oversized root stays
+readable, and another domain can still complete within its own limit. The cap does
+not automatically clean existing data; use domain maintenance to bring it below
+the ceiling. Agent Correction collections retain their existing entry limits too.
 
 Memory, guidance, and skills accumulate pending evidence independently. Their shared
 batch settings live in `rightmemory.toml`:

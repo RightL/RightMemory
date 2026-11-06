@@ -14,6 +14,7 @@ class CurationBackend(Protocol):
     def begin(self, domain: str, *, mode: str = "update", scope: str = "", retry_task: str | None = None) -> dict[str, Any]: ...
     def complete(self, task_id: str, output: str = "") -> dict[str, Any]: ...
     def status(self, task_id: str | None = None) -> dict[str, Any]: ...
+    def count(self, domain: str, task_id: str | None = None) -> dict[str, Any]: ...
     def withdraw(self, candidate_id: str) -> dict[str, Any]: ...
 
 
@@ -66,6 +67,10 @@ def register_curation_tools(
     @server.tool(name="rightmemory_curation_status", description="Inspect pending candidates, domain readiness, or a task without starting model work. " + ready_guidance, structured_output=False)
     def status(task_id: str | None = None) -> CallToolResult:
         return _invoke(lambda: selected().status(task_id))
+
+    @server.tool(name="rightmemory_count_curation_tokens", description="Count a domain's retained text and report its token limit. Supply a task ID to count the edited worktree.", structured_output=False)
+    def count(domain: Literal["memory", "guidance", "skills"], task_id: str | None = None) -> CallToolResult:
+        return _invoke(lambda: selected().count(domain, task_id))
 
     @server.tool(name="rightmemory_withdraw_candidate", description="Withdraw a pending candidate by identity. This prevents further processing; it does not undo already published domain conclusions.", structured_output=False)
     def withdraw(candidate_id: str) -> CallToolResult:

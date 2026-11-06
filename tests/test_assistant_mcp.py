@@ -79,6 +79,7 @@ class AssistantMcpTests(unittest.TestCase):
                 "rightmemory_begin_curation",
                 "rightmemory_complete_curation",
                 "rightmemory_curation_status",
+                "rightmemory_count_curation_tokens",
             },
         )
 
@@ -164,7 +165,12 @@ class AssistantMcpStdioTests(IsolatedWriteTestBase):
                     initialized = await client.initialize()
                     self.assertEqual(initialized.server_info.name, "RightMemory Assistant")
                     listed = await client.list_tools()
-                    self.assertEqual(len(listed.tools), 9)
+                    self.assertEqual(len(listed.tools), 10)
+
+                    counted = await client.call_tool("rightmemory_count_curation_tokens", {"domain": "memory"})
+                    self.assertFalse(counted.is_error)
+                    self.assertEqual(counted.structured_content["active_root"], str(self.root.resolve()))
+                    self.assertGreater(counted.structured_content["retained_text_tokens"], 0)
 
                     result = await client.call_tool(
                         "rightmemory_assistant_context", {"session_id": "stdio-session"}
