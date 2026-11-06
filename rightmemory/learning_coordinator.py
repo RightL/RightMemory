@@ -219,7 +219,8 @@ class LearningCoordinator:
                             git_result(worktree, "cherry-pick", "--abort")
                             raise LearningSemanticBaseChanged("prepared result no longer applies to domain state")
                         supervisor._validate_commits(worktree, [git(worktree, "rev-parse", "HEAD")])
-                    require_domain_budget(worktree, claim.domain, state_root=self.memory_root)
+                    if claim.mode == "maintain":
+                        require_domain_budget(worktree, claim.domain, state_root=self.memory_root)
                     paths = [remove_learning_claim(worktree, claim)]
                     if claim.mode == "update":
                         paths.extend(record_learning_processed(worktree, claim.domain, claim.candidate_ids))

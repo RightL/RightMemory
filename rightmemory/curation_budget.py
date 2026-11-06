@@ -1,15 +1,14 @@
-"""Independent retained-text budgets at curation publication boundaries."""
+"""Independent retained-text budgets for maintenance publication."""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
 from .config import load_curation_token_limits
-from .learning import DOMAIN_ROLES
 
 
 class CurationBudgetExceededError(ValueError):
-    """A curator's retained text exceeds its independently configured limit."""
+    """Maintenance retained text exceeds its independently configured limit."""
 
 
 def domain_budget(
@@ -34,16 +33,7 @@ def require_domain_budget(
         raise CurationBudgetExceededError(
             f"{domain} retains {budget['retained_text_tokens']:,} tokens, exceeding its "
             f"{budget['token_limit']:,}-token limit by {-budget['remaining_tokens']:,}. "
-            "Delete or compact lower-value material in this domain before completing curation. "
+            "Delete lower-value material or compact retained content before completing maintenance. "
             "The active state and pending evidence have not been replaced by this result."
         )
     return budget
-
-
-def require_role_budget(
-    memory_root: Path, role: str, *, state_root: Path | None = None,
-) -> dict[str, Any] | None:
-    for domain, curator_role in DOMAIN_ROLES.items():
-        if role == curator_role:
-            return require_domain_budget(memory_root, domain, state_root=state_root)
-    return None

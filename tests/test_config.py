@@ -923,18 +923,39 @@ class RuntimeTests(unittest.TestCase):
             {"read_detail", "read_markdown", "read_skill", "read_mf", "read_learning", "search_learning"},
         )
 
-    def test_standalone_token_count_tool_is_available_only_to_curation_roles(self):
+    def test_standalone_token_count_tool_is_available_only_for_maintenance_curation(self):
         root = Path(self.tempdir.name)
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.build_instructions", return_value=""),
+        ):
             for role in sorted(RUNTIME_ROLES):
                 with self.subTest(role=role):
                     config = RuntimeConfig(role=role, model_id="openai/test", memory_root=root)
-                    runtime = RightMemoryRuntime(config)
+                    runtime = RightMemoryRuntime(config, curation_mode="maintain")
                     tool_names = {tool.__name__ for tool in runtime.agent.tools}
                     self.assertEqual(
                         "count_curation_tokens" in tool_names,
                         role in {"update", "guidance-curator", "skills-curator"},
                     )
+
+    def test_standalone_updates_do_not_count_retained_text_or_expose_count_tool(self):
+        root = Path(self.tempdir.name)
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.build_instructions", return_value=""),
+            patch.object(
+                RightMemoryRuntime, "count_curation_tokens", autospec=True,
+                side_effect=AssertionError("unexpected token count"),
+            ),
+        ):
+            for role in ("update", "guidance-curator", "skills-curator"):
+                for mode in (None, "update"):
+                    with self.subTest(role=role, mode=mode):
+                        config = RuntimeConfig(role=role, model_id="openai/test", memory_root=root)
+                        runtime = RightMemoryRuntime(config, curation_mode=mode)
+                        tool_names = {tool.__name__ for tool in runtime.agent.tools}
+                        self.assertNotIn("count_curation_tokens", tool_names)
 
     def test_standalone_token_count_uses_edited_files_and_current_active_config(self):
         root = Path(self.tempdir.name)
@@ -950,8 +971,12 @@ class RuntimeTests(unittest.TestCase):
         edited_memory.write_text("hello", encoding="utf-8")
         config = RuntimeConfig(role="update", model_id="openai/test", memory_root=edited, state_root=active)
 
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.build_instructions", return_value="") as build,
+        ):
+            runtime = RightMemoryRuntime(config, curation_mode="maintain")
+            build.assert_called_once_with(edited, "update", curation_mode="maintain")
             count = next(tool for tool in runtime.agent.tools if tool.__name__ == "count_curation_tokens")
 
             at_limit = count()
@@ -998,6 +1023,7 @@ class RuntimeTests(unittest.TestCase):
             codex_runner=codex_runner,
             state_root=Path(self.tempdir.name),
             curation_config_root=Path(self.tempdir.name),
+            curation_mode=None,
             fresh_provider_session=False,
             trace_event=runtime._trace,
         )
@@ -1117,10 +1143,10 @@ class RuntimeTests(unittest.TestCase):
         trace = object()
 
         class FakeNestedRuntime:
-            def __init__(self, config, *, codex_runner=None, curation_config_root=None):
+            def __init__(self, config, *, codex_runner=None, curation_config_root=None, curation_mode=None):
                 self.config = config
                 self._active_trace = None
-                nested_settings.append((config, curation_config_root))
+                nested_settings.append((config, curation_config_root, curation_mode))
 
             def _run_locked_turn(self, callback, *, isolate_write=False):
                 calls.append(("locked", isolate_write))
@@ -1140,8 +1166,11 @@ class RuntimeTests(unittest.TestCase):
             sync=load_sync_config_for_test(main_root, enabled=True),
         )
 
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.build_instructions", return_value=""),
+        ):
+            runtime = RightMemoryRuntime(config, curation_mode="maintain")
         runtime._active_trace = trace
 
         with patch("rightmemory.runtime.RightMemoryRuntime", FakeNestedRuntime):
@@ -1149,10 +1178,11 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(result, "model result")
         self.assertEqual(len(nested_settings), 1)
-        nested_config, curation_config_root = nested_settings[0]
+        nested_config, curation_config_root, curation_mode = nested_settings[0]
         self.assertEqual(nested_config.memory_root, worktree)
         self.assertEqual(nested_config.state_root, state_root)
         self.assertEqual(curation_config_root, main_root)
+        self.assertEqual(curation_mode, "maintain")
         self.assertFalse(nested_config.fresh_provider_session)
         self.assertFalse(nested_config.sync.enabled)
         self.assertEqual(nested_config.sync.memory_root, worktree)
@@ -1167,8 +1197,8 @@ class RuntimeTests(unittest.TestCase):
 
     def test_isolated_worktree_runtime_uses_cli_agent_path(self):
         main_root = Path(self.tempdir.name)
-        worktree = main_root / ".runtime" / "worktrees" / "pruner-123"
-        state_root = main_root / ".runtime" / "isolated-state" / "pruner-123"
+        worktree = main_root / ".runtime" / "worktrees" / "curator-123"
+        state_root = main_root / ".runtime" / "isolated-state" / "curator-123"
         nested_configs = []
         nested_contexts = []
         calls = []
@@ -1176,10 +1206,10 @@ class RuntimeTests(unittest.TestCase):
         active_config_root = main_root / "active"
 
         class FakeNestedRuntime:
-            def __init__(self, config, *, codex_runner=None, curation_config_root=None):
+            def __init__(self, config, *, codex_runner=None, curation_config_root=None, curation_mode=None):
                 self.config = config
                 nested_configs.append(config)
-                nested_contexts.append((codex_runner, curation_config_root))
+                nested_contexts.append((codex_runner, curation_config_root, curation_mode))
 
             def _run_locked_turn(self, callback, *, isolate_write=False):
                 calls.append(("locked", isolate_write))
@@ -1193,15 +1223,18 @@ class RuntimeTests(unittest.TestCase):
                 calls.append(("cleanup",))
 
         config = RuntimeConfig(
-            role="pruner",
+            role="guidance-curator",
             runtime_mode="cli-agent",
             agent_cli=AgentCliConfig(provider="codex"),
             memory_root=main_root,
             sync=load_sync_config_for_test(main_root, enabled=True),
         )
 
-        with patch("rightmemory.runtime.CliAgentExecutor"):
-            runtime = RightMemoryRuntime(config, codex_runner=codex_runner, curation_config_root=active_config_root)
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            runtime = RightMemoryRuntime(
+                config, codex_runner=codex_runner, curation_config_root=active_config_root,
+                curation_mode="maintain",
+            )
 
         with patch("rightmemory.runtime.RightMemoryRuntime", FakeNestedRuntime):
             result = runtime._run_session_turn_in_worktree(worktree, state_root, "agent-session", "prune one")
@@ -1211,7 +1244,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(nested_configs[0].state_root, state_root)
         self.assertTrue(nested_configs[0].fresh_provider_session)
         self.assertFalse(nested_configs[0].sync.enabled)
-        self.assertEqual(nested_contexts, [(codex_runner, active_config_root)])
+        self.assertEqual(executor_class.call_args.kwargs["curation_mode"], "maintain")
+        self.assertEqual(nested_contexts, [(codex_runner, active_config_root, "maintain")])
         self.assertEqual(
             calls,
             [

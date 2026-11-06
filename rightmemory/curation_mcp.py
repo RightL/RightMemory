@@ -68,7 +68,7 @@ def register_curation_tools(
     def status(task_id: str | None = None) -> CallToolResult:
         return _invoke(lambda: selected().status(task_id))
 
-    @server.tool(name="rightmemory_count_curation_tokens", description="Count a domain's retained text and report its token limit. Supply a task ID to count the edited worktree.", structured_output=False)
+    @server.tool(name="rightmemory_count_curation_tokens", description="Count a domain's retained text and report its maintenance token limit. Supply a task ID to count the edited worktree.", structured_output=False)
     def count(domain: Literal["memory", "guidance", "skills"], task_id: str | None = None) -> CallToolResult:
         return _invoke(lambda: selected().count(domain, task_id))
 

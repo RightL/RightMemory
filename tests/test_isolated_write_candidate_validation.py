@@ -3,7 +3,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rightmemory.curation_budget import CurationBudgetExceededError
 from rightmemory.isolated_write import (
     IsolatedWriteSupervisor,
     MainMemoryDirtyError,
@@ -22,170 +21,98 @@ class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
             encoding="utf-8",
         )
 
-    def test_curation_publication_checks_only_the_assigned_domain_budget(self):
-        self._set_token_limits(80)
+    def _seed_over_budget_domains(self):
         cases = (
             ("update", "MEMORY.md", "# Memory\n\n- `retained` {} → []\n"),
             ("guidance-curator", "learning/guidance/working.md", "# Working guidance\n\n{}\n"),
             ("skills-curator", "learning/skills/review/SKILL.md", "# Review\n\n{}\n"),
         )
-        for role, assigned, template in cases:
+        for _role, relative, template in cases:
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(template.format("retained context " * 100), encoding="utf-8")
+        self._git("add", "MEMORY.md", "learning")
+        self._git("commit", "-m", "seed oversized domains")
+        return cases
+
+    def test_direct_curator_updates_can_exceed_maintenance_budgets(self):
+        cases = self._seed_over_budget_domains()
+        self._set_token_limits(1)
+        for role, relative, template in cases:
             with self.subTest(role=role):
-                for _role, relative, content in cases:
-                    path = self.root / relative
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content.format("retained context " * 1000), encoding="utf-8")
-                self._git("add", "MEMORY.md", "learning")
-                self._git("commit", "-m", "seed oversized independent domains")
-                untouched = {
-                    relative: (self.root / relative).read_bytes()
-                    for _role, relative, _content in cases if relative != assigned
-                }
+                content = template.format("additional retained context " * 100)
 
                 def callback(worktree: Path) -> None:
-                    (worktree / assigned).write_text(template.format("Useful context."), encoding="utf-8")
-                    self._git("add", assigned, cwd=worktree)
-                    self._git("commit", "-m", "curate assigned domain", cwd=worktree)
+                    (worktree / relative).write_text(content, encoding="utf-8")
+                    self._git("add", relative, cwd=worktree)
+                    self._git("commit", "-m", "retain useful update", cwd=worktree)
 
                 result = IsolatedWriteSupervisor(self.root, role).run(callback)
-                self.assertEqual(result.changed_paths, (assigned,))
-                for relative, data in untouched.items():
-                    self.assertEqual((self.root / relative).read_bytes(), data)
+                self.assertEqual(result.changed_paths, (relative,))
+                self.assertEqual((self.root / relative).read_text(encoding="utf-8"), content)
                 self._assert_isolated_cleanup()
 
-    def test_direct_no_change_checks_budget_without_restricting_other_roles(self):
+    def test_direct_no_change_ignores_maintenance_budgets(self):
+        cases = self._seed_over_budget_domains()
         self._set_token_limits(1)
-        with self.assertRaises(CurationBudgetExceededError):
-            IsolatedWriteSupervisor(self.root, "update").run(lambda _worktree: "unchanged")
-        result = IsolatedWriteSupervisor(self.root, "pruner").run(lambda _worktree: "unchanged")
-        self.assertEqual(result.commits_landed, 0)
-        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
-        self._assert_isolated_cleanup()
+        head = self._git("rev-parse", "HEAD")
+        for role, _relative, _template in cases:
+            with self.subTest(role=role):
+                operation_id = role + "-uncapped-no-change"
+                result = IsolatedWriteSupervisor(self.root, role).run(
+                    lambda _worktree: "unchanged", operation_id=operation_id,
+                )
+                self.assertEqual(result.commits_landed, 0)
+                self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "no_change")
+                self._assert_isolated_cleanup()
 
-    def test_prepared_commit_rechecks_active_configuration_before_recovery(self):
-        self._set_token_limits(10000)
-        supervisor = IsolatedWriteSupervisor(self.root, "update")
-        operation_id = "update-budget-recovery"
+    def test_prepared_update_recovers_after_maintenance_limit_is_lowered(self):
+        cases = self._seed_over_budget_domains()
+        for role, relative, template in cases:
+            with self.subTest(role=role):
+                self._set_token_limits(10000)
+                supervisor = IsolatedWriteSupervisor(self.root, role)
+                operation_id = role + "-uncapped-recovery"
+                content = template.format("additional retained context " * 100)
 
-        def callback(worktree: Path) -> str:
-            self._append_memory(worktree, "- `retained` " + "context " * 1000 + " → []\n")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "retain bounded memory", cwd=worktree)
-            return "updated"
+                def callback(worktree: Path) -> str:
+                    (worktree / relative).write_text(content, encoding="utf-8")
+                    self._git("add", relative, cwd=worktree)
+                    self._git("commit", "-m", "retain useful update", cwd=worktree)
+                    return "updated"
 
-        with patch.object(supervisor, "_land_operation_commit", side_effect=OSError("interrupted")):
-            with self.assertRaises(OSError):
-                supervisor.run(callback, operation_id=operation_id)
-        prepared = SemanticOperationStore(self.root).read(operation_id)
-        self.assertEqual(prepared.phase, "prepared")
-        self._set_token_limits(80)
-        with self.assertRaises(CurationBudgetExceededError):
-            supervisor.run(lambda _worktree: self.fail("prepared recovery reran the worker"), operation_id=operation_id)
-        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
-        self.assertEqual(SemanticOperationStore(self.root).read(operation_id).outcome, prepared.outcome)
-        self._assert_isolated_cleanup()
+                with patch.object(supervisor, "_land_operation_commit", side_effect=OSError("interrupted")):
+                    with self.assertRaises(OSError):
+                        supervisor.run(callback, operation_id=operation_id)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "prepared")
+                self._set_token_limits(1)
+                result = supervisor.run(
+                    lambda _worktree: self.fail("prepared recovery reran the worker"),
+                    operation_id=operation_id,
+                )
+                self.assertEqual(result.commits_landed, 1)
+                self.assertEqual((self.root / relative).read_text(encoding="utf-8"), content)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "committed")
+                self._assert_isolated_cleanup()
 
-        self._set_token_limits(10000)
-        result = supervisor.run(
-            lambda _worktree: self.fail("prepared recovery reran the worker"), operation_id=operation_id,
-        )
-        self.assertEqual(result.commits_landed, 1)
-        self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "committed")
-
-    def test_prepared_no_change_rechecks_active_configuration_before_recovery(self):
-        self._set_token_limits(80)
-        supervisor = IsolatedWriteSupervisor(self.root, "update")
-        operation_id = "update-no-change-budget-recovery"
-        with patch.object(SemanticOperationStore, "complete_no_change", side_effect=OSError("interrupted")):
-            with self.assertRaises(OSError):
-                supervisor.run(lambda _worktree: "unchanged", operation_id=operation_id)
-        self._set_token_limits(1)
-        with self.assertRaises(CurationBudgetExceededError):
-            supervisor.recover_prepared()
-        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
-        self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "prepared")
-        (self.root / "MEMORY.md").write_text("", encoding="utf-8")
-        with self.assertRaises(MainMemoryDirtyError):
-            supervisor.recover_prepared()
-        self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "prepared")
-        self._git("checkout", "--", "MEMORY.md")
-        self._set_token_limits(80)
-        supervisor.recover_prepared()
-        self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "no_change")
-
-    def test_over_budget_prepared_memory_does_not_block_another_curator(self):
-        self._set_token_limits(10000)
-        supervisor = IsolatedWriteSupervisor(self.root, "update")
-        operation_id = "update-independent-budget-recovery"
-
-        def memory_callback(worktree: Path) -> None:
-            self._append_memory(worktree, "- `retained` " + "context " * 1000 + " → []\n")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "prepare memory update", cwd=worktree)
-
-        with patch.object(supervisor, "_land_operation_commit", side_effect=OSError("interrupted")):
-            with self.assertRaises(OSError):
-                supervisor.run(memory_callback, operation_id=operation_id)
-        prepared = SemanticOperationStore(self.root).read(operation_id)
-        self._set_token_limits(80)
-
-        def guidance_callback(worktree: Path) -> None:
-            path = worktree / "learning/guidance/working.md"
-            path.parent.mkdir(parents=True)
-            path.write_text("# Working guidance\n\nUseful retained context.\n", encoding="utf-8")
-            self._git("add", path.relative_to(worktree).as_posix(), cwd=worktree)
-            self._git("commit", "-m", "curate guidance independently", cwd=worktree)
-
-        result = IsolatedWriteSupervisor(self.root, "guidance-curator").run(
-            guidance_callback, operation_id="guidance-independent-budget-recovery",
-        )
-        self.assertEqual(result.changed_paths, ("learning/guidance/working.md",))
-        pending = SemanticOperationStore(self.root).read(operation_id)
-        self.assertEqual(pending.phase, "prepared")
-        self.assertEqual(pending.outcome, prepared.outcome)
-        self.assertNotEqual(pending.failure, prepared.failure)
-        self.assertEqual((self.root / "MEMORY.md").read_bytes(), (self._seed_root / "MEMORY.md").read_bytes())
-        self.assertTrue(self._git("for-each-ref", "--format=%(refname)", "refs/rightmemory/operations"))
-        self._assert_isolated_cleanup()
-
-    def test_over_budget_prepared_no_change_does_not_block_successive_other_curators(self):
-        self._set_token_limits(10000)
-        path = self.root / "learning/guidance/working.md"
-        path.parent.mkdir(parents=True)
-        path.write_text("# Working guidance\n\n" + "context " * 1000 + "\n", encoding="utf-8")
-        self._git("add", "learning/guidance/working.md")
-        self._git("commit", "-m", "seed retained guidance")
-        original = path.read_bytes()
-        supervisor = IsolatedWriteSupervisor(self.root, "guidance-curator")
-        operation_id = "guidance-no-change-independent-recovery"
-        with patch.object(SemanticOperationStore, "complete_no_change", side_effect=OSError("interrupted")):
-            with self.assertRaises(OSError):
-                supervisor.run(lambda _worktree: "unchanged", operation_id=operation_id)
-        self._set_token_limits(80)
-
-        def memory_callback(worktree: Path) -> None:
-            self._append_memory(worktree, "- `retained` Useful context. → []\n")
-            self._git("add", "MEMORY.md", cwd=worktree)
-            self._git("commit", "-m", "curate memory independently", cwd=worktree)
-
-        IsolatedWriteSupervisor(self.root, "update").run(
-            memory_callback, operation_id="memory-after-guidance-budget-failure",
-        )
-
-        def skills_callback(worktree: Path) -> None:
-            skill = worktree / "learning/skills/review/SKILL.md"
-            skill.parent.mkdir(parents=True)
-            skill.write_text("# Review\n\nUseful retained context.\n", encoding="utf-8")
-            self._git("add", skill.relative_to(worktree).as_posix(), cwd=worktree)
-            self._git("commit", "-m", "curate skills independently", cwd=worktree)
-
-        result = IsolatedWriteSupervisor(self.root, "skills-curator").run(
-            skills_callback, operation_id="skills-after-guidance-budget-failure",
-        )
-        self.assertEqual(result.changed_paths, ("learning/skills/review/SKILL.md",))
-        self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "prepared")
-        self.assertEqual(path.read_bytes(), original)
-        self._assert_isolated_cleanup()
+    def test_prepared_no_change_recovers_after_maintenance_limit_is_lowered(self):
+        cases = self._seed_over_budget_domains()
+        head = self._git("rev-parse", "HEAD")
+        for role, _relative, _template in cases:
+            with self.subTest(role=role):
+                self._set_token_limits(10000)
+                supervisor = IsolatedWriteSupervisor(self.root, role)
+                operation_id = role + "-uncapped-no-change-recovery"
+                with patch.object(SemanticOperationStore, "complete_no_change", side_effect=OSError("interrupted")):
+                    with self.assertRaises(OSError):
+                        supervisor.run(lambda _worktree: "unchanged", operation_id=operation_id)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "prepared")
+                self._set_token_limits(1)
+                supervisor.recover_prepared()
+                self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "no_change")
+                self._assert_isolated_cleanup()
 
     def test_tree_validation_checks_every_changed_path(self):
         for name in ("MEMORY_safe.md", "MEMORY_unsafe.md"):

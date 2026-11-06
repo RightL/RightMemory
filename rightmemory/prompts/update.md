@@ -2,9 +2,7 @@
 
 Apply the shared Memory core to the supplied task. Update reconciles candidate evidence into durable context; Maintain improves existing Memory within the requested scope. Candidates are evidence, not stored wording or destination instructions. Most candidate content should be filtered out. Pursuit is read-only context. Behavioral guidance, Agent Corrections, and reusable work experiences or skills belong to their own curators, including when the user explicitly asked to remember them.
 
-**During maintenance, reassess related Memory items as a collection: what durable context should remain to help future assistance?** **Use deletion and compaction as primary actions**, preserving the context needed to understand and use what remains.
-
-**Keep this domain within its supplied retained-text token limit, and recount edited state before finishing.** The limit is a ceiling, not a target or a reason to retain weak material. Delete or compact lower-value content within the task's scope; if meeting the limit requires broader changes or losing useful meaning, report that instead of declaring completion.
+**During maintenance, reassess related Memory items as a collection: what durable context should remain to help future assistance?**
 
 ## Reconcile
 

@@ -144,11 +144,13 @@ class RightMemoryRuntime:
         *,
         codex_runner: CodexSdkRunner | None = None,
         curation_config_root: Path | None = None,
+        curation_mode: str | None = None,
     ):
         if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
         self._curation_config_root = curation_config_root or config.state_root
+        self._curation_mode = curation_mode
         if config.retrieve_backend not in {"agent", "embedding"}:
             raise ValueError(f"unsupported retrieval backend: {config.retrieve_backend}")
         self._embedding_retriever = None
@@ -1200,6 +1202,7 @@ class RightMemoryRuntime:
         nested = RightMemoryRuntime(
             nested_config, codex_runner=self._codex_runner,
             curation_config_root=self._curation_config_root,
+            curation_mode=self._curation_mode,
         )
         nested._active_trace = self._active_trace
         try:
@@ -1649,8 +1652,10 @@ class RightMemoryRuntime:
         except ImportError as exc:
             raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
 
-        instructions = build_instructions(self.config.memory_root, self.config.role)
-        if self.config.role in DOMAIN_ROLES.values():
+        instructions = build_instructions(
+            self.config.memory_root, self.config.role, curation_mode=self._curation_mode,
+        )
+        if self._curation_mode == "maintain" and self.config.role in DOMAIN_ROLES.values():
             budget = self.count_curation_tokens()
             instructions += (
                 f"\n\nRetained-text budget for {budget['domain']}: "
@@ -1691,6 +1696,7 @@ class RightMemoryRuntime:
         kwargs: dict[str, Any] = {
             "state_root": self.config.state_root,
             "curation_config_root": self._curation_config_root,
+            "curation_mode": self._curation_mode,
             "fresh_provider_session": self.config.fresh_provider_session,
             "trace_event": self._trace,
         }
@@ -1719,12 +1725,13 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.read_command),
             self._agent_tool(self.tools.outline_file),
         ]
-        if self.config.role in CURATOR_ROLES | {"update"}:
+        if self.config.role in DOMAIN_ROLES.values():
             read_tools.extend([
                 self._agent_tool(self.tools.read_learning),
                 self._agent_tool(self.tools.search_learning),
-                self._agent_tool(self.count_curation_tokens),
             ])
+            if self._curation_mode == "maintain":
+                read_tools.append(self._agent_tool(self.count_curation_tokens))
         if self.config.role != "insight":
             read_tools.append(self._agent_tool(self.tools.validate_memory))
         if self.config.role in HISTORY_READ_ROLES:

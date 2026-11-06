@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .automatic_effects import memory_operation_effects, prepare_memory_operation_effects
+from .curation_budget import require_domain_budget
 from .isolated_write import (
     IsolatedWriteResult,
     IsolatedWriteSupervisor,
@@ -138,6 +139,8 @@ class AssistantWriteManager:
                     self.supervisor._run_git(worktree, "cherry-pick", "--allow-empty", commit)
                 # The no-change path must also pass complete graph validation.
                 self.supervisor._validate_candidate(worktree, [])
+                if task.input_data.get("mode") == "maintain":
+                    require_domain_budget(worktree, task.input_data["domain"], state_root=self.memory_root)
                 return task.output or ""
 
             try:
