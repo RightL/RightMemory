@@ -39,6 +39,10 @@ class CurationCliTests(IsolatedWriteTestBase):
         for domain in ("memory", "guidance", "skills"):
             _, task = self.invoke(["begin", "--domain", domain])
             self.assertEqual(task["status"], "prepared")
+            self.assertNotIn("count_argv", task)
+            code, counted = self.invoke(["count", "--domain", domain, "--task", task["task_id"]])
+            self.assertEqual(code, 0)
+            self.assertEqual(counted["task_id"], task["task_id"])
             _, done = self.invoke(["complete", "--task", task["task_id"]])
             self.assertEqual(done["status"], "completed")
             self.assertEqual(source_id in learning_sources(self.root), domain != "skills")

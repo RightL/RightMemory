@@ -46,6 +46,7 @@ class RuntimeStateRootTests(unittest.TestCase):
             codex_runner=runtime._codex_runner,
             state_root=state_root,
             curation_config_root=state_root,
+            curation_mode=None,
             fresh_provider_session=False,
             trace_event=runtime._trace,
         )

@@ -336,7 +336,7 @@ class LearningService:
                 config, memory_root=task.worktree, state_root=self.memory_root,
                 fresh_provider_session=True, sync=replace(config.sync, enabled=False),
             )
-            runtime = RightMemoryRuntime(config)
+            runtime = RightMemoryRuntime(config, curation_mode=task.input_data["mode"])
             try:
                 output = runtime.run_session_turn(task_id, _curation_input(task.input_data))
             finally:
@@ -353,22 +353,30 @@ class LearningService:
         from .prompt import build_cli_agent_instructions
 
         domain = record["domain"]
+        data = record["input"]
+        mode = data["mode"]
         task = self._writer(domain).prepare(
-            record["task_id"], record["input"], check_current=lambda: self._check_current(record),
+            record["task_id"], data, check_current=lambda: self._check_current(record),
         )
         directory = self.root / "tasks" / record["task_id"]
         candidates_file = directory / "candidates.json"
         instructions_file = directory / "instructions.md"
-        self._write(candidates_file, record["input"])
-        canonical = build_cli_agent_instructions(task.worktree, DOMAIN_ROLES[domain])
-        budget = domain_budget(task.worktree, domain, state_root=self.memory_root)
-        count = self._argv("count", "--domain", domain, "--task", task.task_id)
+        self._write(candidates_file, data)
+        canonical = build_cli_agent_instructions(task.worktree, DOMAIN_ROLES[domain], curation_mode=mode)
+        budget_context = ""
+        budget_info = {}
+        if mode == "maintain":
+            budget = domain_budget(task.worktree, domain, state_root=self.memory_root)
+            count_argv = self._argv("count", "--domain", domain, "--task", task.task_id)
+            budget_context = (
+                f"Retained text uses {budget['retained_text_tokens']} of {budget['token_limit']} tokens. "
+                f"Recount the edited worktree with `{shlex.join(count_argv)}`.\n\n"
+            )
+            budget_info = {"token_budget": budget, "count_argv": count_argv}
         complete = self._argv("complete", "--task", task.task_id)
         status = self._argv("status", "--task", task.task_id)
         instructions = (
-            f"{canonical}\n\n{_curation_input(record['input'])}\n\n"
-            f"Retained text uses {budget['retained_text_tokens']} of {budget['token_limit']} tokens. "
-            f"Recount the edited worktree with `{shlex.join(count)}`.\n\n"
+            f"{canonical}\n\n{_curation_input(data)}\n\n{budget_context}"
             f"Native task {task.task_id}: edit and commit only allowed files in {task.worktree}. "
             f"Read the frozen candidate manifest from {candidates_file}. "
             "Source_file paths are relative to the candidate worktree; read their decoded evidence "
@@ -385,11 +393,11 @@ class LearningService:
         return {
             "status": "prepared", "claimed": claimed, "task_id": task.task_id,
             "domain": domain, "executor": record["executor"],
-            "mode": record["input"]["mode"], "scope": record["input"]["scope"],
-            "selected_candidate_count": len(record["input"]["candidates"]),
+            "mode": mode, "scope": data["scope"],
+            "selected_candidate_count": len(data["candidates"]),
             "worktree": str(task.worktree), "instructions_file": str(instructions_file),
             "candidates_file": str(candidates_file), "complete_argv": complete, "status_argv": status,
-            "token_budget": budget, "count_argv": count,
+            **budget_info,
         }
 
     def _complete(self, record: dict, output: str = "") -> dict[str, Any]:

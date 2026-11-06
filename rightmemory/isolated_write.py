@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .curation_budget import CurationBudgetExceededError, require_role_budget
 from .platform import process_exists, process_identity
 from .session import MemoryWriteLock, _ensure_runtime_gitignore, _fsync_directory
 from .semantic_operation import (
@@ -30,7 +29,7 @@ from .graph import (
     build_graph_manifest,
     remove_edge_targets,
 )
-from .learning import DOMAIN_ROLES, is_learning_path, is_learning_state_path, learning_write_path
+from .learning import is_learning_path, is_learning_state_path, learning_write_path
 from .tools import (
     CORRECTIONS_PATH,
     FIXED_CORRECTION_COLLECTION_PATHS,
@@ -397,7 +396,6 @@ class IsolatedWriteSupervisor:
                     changed_paths = tuple(
                         sorted({path for commit in commits for path in self._commit_paths(worktree, commit)})
                     )
-                require_role_budget(worktree, self.role, state_root=self.memory_root)
                 if check_current is not None:
                     check_current()
                 if operation_store is not None and operation_id is not None:
@@ -501,7 +499,6 @@ class IsolatedWriteSupervisor:
                         # Prepared outcomes can outlive a role-policy change.
                         # Recheck the current fence before publishing their saved tree.
                         self._validate_commits(self.memory_root, [candidate])
-                        self._require_prepared_budget(candidate)
                         if current_head == outcome.start_commit:
                             self._land_operation_commit(candidate)
                         else:
@@ -521,11 +518,6 @@ class IsolatedWriteSupervisor:
                     landed_commit = candidate
                 commits_landed = 1
             else:
-                if self.role in DOMAIN_ROLES.values():
-                    dirty = self._dirty_memory_files()
-                    if dirty:
-                        raise MainMemoryDirtyError(dirty)
-                require_role_budget(self.memory_root, self.role, state_root=self.memory_root)
                 if current_head != outcome.start_commit:
                     semantic_changes = self._semantic_changes_between(
                         outcome.start_commit,
@@ -578,15 +570,7 @@ class IsolatedWriteSupervisor:
                 )
             claimed = store.claim_prepared(record.operation_id)
             supervisor = IsolatedWriteSupervisor(self.memory_root, role)
-            try:
-                supervisor._resume_prepared_operation(store, claimed)
-            except CurationBudgetExceededError as exc:
-                store.record_failure(record.operation_id, f"{type(exc).__name__}: {exc}")
-                if self.role not in DOMAIN_ROLES.values() or role == self.role:
-                    raise
-                # Preserve this domain's result for its owner while another
-                # curator continues with an independent budget.
-                continue
+            supervisor._resume_prepared_operation(store, claimed)
 
     def _result_from_operation(self, operation: SemanticOperationRecord) -> IsolatedWriteResult:
         outcome = operation.outcome
@@ -713,26 +697,6 @@ class IsolatedWriteSupervisor:
         )
         if validation.startswith("validation failed:"):
             raise RuntimeError(validation)
-        require_role_budget(worktree, self.role, state_root=self.memory_root)
-
-    def _require_prepared_budget(self, commit: str) -> None:
-        if self.role not in DOMAIN_ROLES.values():
-            return
-        role_slug = _safe_role_slug(self.role)
-        identifier = uuid.uuid4().hex
-        worktree = self.memory_root / ".runtime" / "worktrees" / f"{role_slug}-{identifier}"
-        lease = WorktreeLease(self.memory_root, role_slug, identifier)
-        self._ensure_runtime_ignored(worktree)
-        lease.acquire()
-        try:
-            self._run_git(self.memory_root, "worktree", "add", "--detach", str(worktree), commit)
-            require_role_budget(worktree, self.role, state_root=self.memory_root)
-        finally:
-            try:
-                self._run_git(self.memory_root, "worktree", "remove", "--force", str(worktree), check=False)
-                _remove_empty_directory(worktree)
-            finally:
-                lease.release()
 
     def _rebase_operation_commit(self, worktree: Path, commit: str, new_base: str) -> str:
         self._run_git(worktree, "reset", "--hard", new_base)

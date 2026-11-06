@@ -4,9 +4,7 @@ Apply the shared Reusable Work Experience and Skills core to the supplied task. 
 
 For an update, consider related candidates together and inspect relevant experiences, skills, and available resources.
 
-**During maintenance, reassess related records as a collection: what useful experience should remain, and whose future work should it help?** **Use deletion and compaction as primary actions**, preserving the context needed to understand and use what remains.
-
-**Keep this domain within its supplied retained-text token limit, and recount edited state before finishing.** The limit is a ceiling, not a target or a reason to retain weak material. Delete or compact lower-value content within the task's scope; if meeting the limit requires broader changes or losing useful meaning, report that instead of declaring completion.
+**During maintenance, reassess related records as a collection: what useful experience should remain, and whose future work should it help?**
 
 Form a tentative judgment before consulting relevant RightMemory Edit Feedback in root `corrections.md`. For updates, make the smallest coherent change that leaves the affected experience or skill useful as a whole. Leave unrelated state and other domains unchanged. Candidate evidence, claims, and processing receipts are program-owned.
 

@@ -38,6 +38,30 @@ class AssistantWriteTests(IsolatedWriteTestBase):
         self._git("commit", "-m", "memory: retain assistant update", cwd=task.worktree)
         return self._git("rev-parse", "HEAD", cwd=task.worktree)
 
+    def _set_token_limits(self, limit):
+        (self.root / ".git/info").mkdir(parents=True, exist_ok=True)
+        with (self.root / ".git/info/exclude").open("a", encoding="utf-8") as stream:
+            stream.write("\n/rightmemory.toml\n")
+        (self.root / "rightmemory.toml").write_text(
+            f"[curation.token_limits]\nmemory = {limit}\nguidance = {limit}\nskills = {limit}\n",
+            encoding="utf-8",
+        )
+
+    def _budget_cases(self):
+        return (
+            ("memory", "update", "MEMORY.md", "# Memory\n\n- `retained` {} → []\n"),
+            ("guidance", "guidance-curator", "learning/guidance/working.md", "# Working guidance\n\n{}\n"),
+            ("skills", "skills-curator", "learning/skills/review/SKILL.md", "# Review\n\n{}\n"),
+        )
+
+    def _seed_over_budget_domains(self):
+        for _domain, _role, relative, template in self._budget_cases():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(template.format("retained context " * 1000), encoding="utf-8")
+        self._git("add", "MEMORY.md", "learning")
+        self._git("commit", "-m", "seed oversized independent domains")
+
     def test_native_worktree_survives_new_manager_and_finishes_with_frozen_input(self):
         task = self._prepare()
         self._commit_memory(task)
@@ -154,19 +178,9 @@ class AssistantWriteTests(IsolatedWriteTestBase):
         self.assertEqual(result.output, "corrected attempt")
         self.assertIn("native assistant edit", (self.root / "MEMORY.md").read_text())
 
-    def test_over_budget_candidate_can_be_corrected_in_the_same_task(self):
-        (self.root / ".git/info").mkdir(parents=True, exist_ok=True)
-        (self.root / ".git/info/exclude").write_text("/rightmemory.toml\n", encoding="utf-8")
-        (self.root / "rightmemory.toml").write_text(
-            "[curation.token_limits]\nmemory = 80\nguidance = 80\nskills = 80\n",
-            encoding="utf-8",
-        )
-        cases = (
-            ("memory", "update", "MEMORY.md", "# Memory\n\n- `retained` {} → []\n"),
-            ("guidance", "guidance-curator", "learning/guidance/working.md", "# Working guidance\n\n{}\n"),
-            ("skills", "skills-curator", "learning/skills/review/SKILL.md", "# Review\n\n{}\n"),
-        )
-        for domain, role, relative, template in cases:
+    def test_over_budget_maintenance_can_be_corrected_in_the_same_task(self):
+        self._set_token_limits(80)
+        for domain, role, relative, template in self._budget_cases():
             with self.subTest(domain=domain):
                 manager = AssistantWriteManager(self.root, role=role)
                 task = manager.prepare("budget-" + domain, {**self.input_data, "domain": domain})
@@ -192,19 +206,62 @@ class AssistantWriteTests(IsolatedWriteTestBase):
                 self.assertEqual(result.commits_landed, 1)
                 self.assertEqual((self.root / relative).read_bytes(), path.read_bytes())
 
-    def test_no_change_cannot_acknowledge_over_budget_memory_but_state_remains_readable(self):
-        (self.root / ".git/info").mkdir(parents=True, exist_ok=True)
-        (self.root / ".git/info/exclude").write_text("/rightmemory.toml\n", encoding="utf-8")
-        (self.root / "rightmemory.toml").write_text(
-            "[curation.token_limits]\nmemory = 1\n", encoding="utf-8",
-        )
+    def test_no_change_maintenance_cannot_acknowledge_over_budget_state(self):
+        self._set_token_limits(80)
+        self._seed_over_budget_domains()
         self.assertFalse(MemoryTools(self.root).validate_memory().startswith("validation failed:"))
-        task = self._prepare()
-        with self.assertRaises(CurationBudgetExceededError):
-            self._complete(task.task_id)
-        self.assertEqual(self._git("rev-parse", "HEAD"), self.initial_head)
-        self.assertIsNone(self.manager.read(task.task_id).source_commit)
-        self.assertEqual(SemanticOperationStore(self.root).read(task.operation_id).phase, "running")
+        head = self._git("rev-parse", "HEAD")
+        for domain, role, _relative, _template in self._budget_cases():
+            with self.subTest(domain=domain):
+                manager = AssistantWriteManager(self.root, role=role)
+                task = manager.prepare("unchanged-" + domain, {**self.input_data, "domain": domain})
+                with self.assertRaises(CurationBudgetExceededError):
+                    self._complete(task.task_id, manager=manager)
+                self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self.assertIsNone(manager.read(task.task_id).source_commit)
+                self.assertEqual(SemanticOperationStore(self.root).read(task.operation_id).phase, "running")
+
+    def test_updates_can_exceed_maintenance_budgets_and_finish_no_change(self):
+        self._set_token_limits(1)
+        for domain, role, relative, template in self._budget_cases():
+            with self.subTest(domain=domain):
+                manager = AssistantWriteManager(self.root, role=role)
+                input_data = {**self.input_data, "domain": domain, "mode": "update"}
+                task = manager.prepare("update-" + domain, input_data)
+                path = task.worktree / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                content = template.format("retained context " * 1000)
+                path.write_text(content, encoding="utf-8")
+                self._git("add", relative, cwd=task.worktree)
+                self._git("commit", "-m", "retain useful update", cwd=task.worktree)
+                result = self._complete(task.task_id, manager=manager)
+                self.assertEqual(result.commits_landed, 1)
+                self.assertEqual((self.root / relative).read_text(encoding="utf-8"), content)
+
+                unchanged = manager.prepare("update-no-change-" + domain, input_data)
+                result = self._complete(unchanged.task_id, manager=manager)
+                self.assertEqual(result.commits_landed, 0)
+                self.assertEqual((self.root / relative).read_text(encoding="utf-8"), content)
+
+    def test_maintenance_checks_only_its_domain_budget(self):
+        self._set_token_limits(80)
+        for domain, role, relative, template in self._budget_cases():
+            with self.subTest(domain=domain):
+                self._seed_over_budget_domains()
+                untouched = {
+                    other: (self.root / other).read_bytes()
+                    for _domain, _role, other, _template in self._budget_cases() if other != relative
+                }
+                manager = AssistantWriteManager(self.root, role=role)
+                task = manager.prepare("maintain-" + domain, {**self.input_data, "domain": domain})
+                path = task.worktree / relative
+                path.write_text(template.format("Useful context."), encoding="utf-8")
+                self._git("add", relative, cwd=task.worktree)
+                self._git("commit", "-m", "maintain assigned domain", cwd=task.worktree)
+                result = self._complete(task.task_id, manager=manager)
+                self.assertEqual(result.changed_paths, (relative,))
+                for other, content in untouched.items():
+                    self.assertEqual((self.root / other).read_bytes(), content)
 
     def test_stale_semantic_base_does_not_overwrite_new_memory(self):
         task = self._prepare()

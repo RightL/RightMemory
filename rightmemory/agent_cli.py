@@ -67,11 +67,13 @@ class CliAgentExecutor:
         codex_runner: CodexSdkRunner | None = None,
         trace_event: Callable[..., None] | None = None,
         curation_config_root: Path | None = None,
+        curation_mode: str | None = None,
     ):
         _validate_role(role)
         self.memory_root = memory_root
         self.state_root = state_root if state_root is not None else memory_root
         self.curation_config_root = curation_config_root or self.state_root
+        self.curation_mode = curation_mode
         self.role = role
         self.config = config
         self.fresh_provider_session = fresh_provider_session
@@ -318,6 +320,7 @@ class CliAgentExecutor:
             self.role,
             bootstrap_message,
             include_instructions=True,
+            curation_mode=self.curation_mode,
         )
         payload = json.dumps(
             {
@@ -363,6 +366,7 @@ class CliAgentExecutor:
             message,
             include_instructions=not resume,
             curation_config_root=self.curation_config_root,
+            curation_mode=self.curation_mode,
         )
         created_at = _now()
         if self.config.provider == "codex":
@@ -446,6 +450,7 @@ class CliAgentExecutor:
             self.role,
             message,
             include_instructions=False,
+            curation_mode=self.curation_mode,
         )
         created_at = _now()
         if self.config.provider == "codex":
@@ -726,15 +731,16 @@ def _turn_prompt(
     *,
     include_instructions: bool = True,
     curation_config_root: Path | None = None,
+    curation_mode: str | None = None,
 ) -> str:
     caller = f"Caller message:\n{message}\n"
     if not include_instructions:
         return caller
-    instructions = build_cli_agent_instructions(memory_root, role).rstrip()
+    instructions = build_cli_agent_instructions(memory_root, role, curation_mode=curation_mode).rstrip()
     from .learning import DOMAIN_ROLES
 
     domain = next((key for key, curator_role in DOMAIN_ROLES.items() if role == curator_role), None)
-    if domain is not None:
+    if curation_mode == "maintain" and domain is not None:
         from .curation_budget import domain_budget
         import shlex
 

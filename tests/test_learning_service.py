@@ -202,24 +202,32 @@ class LearningServiceTests(IsolatedWriteTestBase):
 
     def test_native_begin_is_model_free_and_reuses_a_durable_task(self):
         candidate_id = self._submit()
-        with patch("rightmemory.config.load_config", side_effect=AssertionError("model config loaded")):
+        with (self.root / "rightmemory.toml").open("a", encoding="utf-8") as handle:
+            handle.write("\n[curation.token_limits]\nguidance = 0\n")
+        with (
+            patch("rightmemory.config.load_config", side_effect=AssertionError("model config loaded")),
+            patch("rightmemory.learning_service.domain_budget", side_effect=AssertionError("counted update")),
+        ):
             task = self.service.begin("guidance")
             again = LearningService(self.root).begin("guidance")
         self.assertTrue(task["claimed"])
         self.assertFalse(again["claimed"])
         self.assertEqual(task["task_id"], again["task_id"])
         self.assertEqual(Path(task["worktree"]).parent, self.root / ".runtime" / "worktrees")
+        for prepared in (task, again):
+            self.assertNotIn("token_budget", prepared)
+            self.assertNotIn("count_argv", prepared)
         payload = AssistantWriteManager(self.root, role="guidance-curator").read(task["task_id"]).input_data
         self.assertEqual(payload["candidates"][0]["candidate_id"], candidate_id)
         self.assertTrue(Path(task["instructions_file"]).is_file())
 
-    def test_native_budget_counts_edited_worktree_with_active_root_limit(self):
+    def test_native_maintenance_budget_counts_edited_worktree_with_active_root_limit(self):
         with (self.root / "rightmemory.toml").open("a", encoding="utf-8") as handle:
             handle.write("\n[curation.token_limits]\nguidance = 20\n")
         self._submit()
         active = self.service.count("guidance")
         with patch("rightmemory.config.load_config", side_effect=AssertionError("model config loaded")):
-            task = self.service.begin("guidance")
+            task = self.service.begin("guidance", mode="maintain")
         worktree = Path(task["worktree"])
         self.assertFalse((worktree / "rightmemory.toml").exists())
         self.assertEqual(task["token_budget"]["token_limit"], 20)
@@ -540,7 +548,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
         calls = []
 
         class Executor:
-            def __init__(self, config):
+            def __init__(self, config, *, curation_mode):
                 pass
 
             def run_session_turn(self, task_id, _message):
@@ -574,12 +582,14 @@ class LearningServiceTests(IsolatedWriteTestBase):
     def test_configured_execution_resumes_failed_task_and_uses_prepared_worktree(self):
         self._submit()
         configurations = []
+        modes = []
         calls = []
         owner = self
 
         class Executor:
-            def __init__(self, config):
+            def __init__(self, config, *, curation_mode):
                 configurations.append(config)
+                modes.append(curation_mode)
                 self.config = config
 
             def run_session_turn(self, task_id, _message):
@@ -603,9 +613,28 @@ class LearningServiceTests(IsolatedWriteTestBase):
             completed = LearningService(self.root).run("guidance")
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(calls[0], calls[1])
+        self.assertEqual(modes, ["update", "update"])
         self.assertEqual(configurations[-1].state_root, self.root)
         self.assertNotEqual(configurations[-1].memory_root, self.root)
         self.assertFalse(configurations[-1].sync.enabled)
+
+    def test_configured_maintenance_retry_keeps_frozen_mode(self):
+        config = RuntimeConfig(role="guidance-curator", memory_root=self.root)
+        with (
+            patch("rightmemory.config.load_config", return_value=config),
+            patch("rightmemory.runtime.RightMemoryRuntime") as runtime,
+        ):
+            runtime.return_value.run_session_turn.side_effect = [RuntimeError("provider unavailable"), "Done"]
+            with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+                self.service.run("guidance", mode="maintain", scope="existing guidance")
+            notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+            retry = self.service.begin("guidance", retry_task=notice["task_id"])
+            self.assertEqual(retry["mode"], "maintain")
+            self.assertIn("token_budget", retry)
+            completed = self.service.run("guidance", mode="maintain", scope="existing guidance")
+        self.assertEqual(completed["task_id"], retry["task_id"])
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual([call.kwargs["curation_mode"] for call in runtime.call_args_list], ["maintain", "maintain"])
 
     def test_curator_executor_inherits_update_configuration(self):
         (self.root / "rightmemory.toml").write_text('[update.model]\nmodel_id = "example"\n')
@@ -622,6 +651,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertEqual(result["task_id"], active["task_id"])
         self.assertEqual(result["requested_mode"], "maintain")
         self.assertEqual(result["requested_scope"], "older cases")
+        self.assertNotIn("token_budget", result)
         self.assertEqual(len(list_learning_candidates(self.root, domain="skills")), 1)
         self.service.complete(active["task_id"])
         maintenance = self.service.begin("skills", mode="maintain", scope="older cases")
