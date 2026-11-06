@@ -13,10 +13,13 @@ from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
 from rightmemory.config import (
     AgentCliConfig,
     CurationBatchConfig,
+    CurationTokenLimits,
     PrunerConfig,
+    RUNTIME_ROLES,
     RuntimeConfig,
     load_config,
     load_curation_batch_config,
+    load_curation_token_limits,
     load_insight_watch_config,
     load_pruner_config,
     load_sync_config,
@@ -69,13 +72,55 @@ class ConfigTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         load_curation_batch_config(root)
 
-    def test_role_and_other_config_loaders_accept_curation_batch_table(self):
+    def test_curation_token_limits_default_and_allow_independent_overrides(self):
+        defaults = CurationTokenLimits(memory=16_000, guidance=4_000, skills=24_000)
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            self.assertEqual(load_curation_token_limits(root), defaults)
+            config_path = root / "rightmemory.toml"
+            for domain in ("memory", "guidance", "skills"):
+                with self.subTest(domain=domain):
+                    config_path.write_text(f"[curation.token_limits]\n{domain}=1\n", encoding="utf-8")
+                    self.assertEqual(load_curation_token_limits(root), replace(defaults, **{domain: 1}))
+
+    def test_curation_token_limits_reject_invalid_tables_and_unknown_keys(self):
+        invalid = (
+            'curation="invalid"',
+            '[curation]\ntoken_limits=1',
+            '[curation]\nunknown=1',
+            '[curation.token_limits]\nunknown=1',
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            config_path = root / "rightmemory.toml"
+            for content in invalid:
+                with self.subTest(content=content):
+                    config_path.write_text(content, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        load_curation_token_limits(root)
+
+    def test_curation_token_limits_require_positive_integers(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            config_path = root / "rightmemory.toml"
+            for domain in ("memory", "guidance", "skills"):
+                for value in ("0", "-1", "true", "false", "1.5", '"15"'):
+                    with self.subTest(domain=domain, value=value):
+                        config_path.write_text(f"[curation.token_limits]\n{domain}={value}\n", encoding="utf-8")
+                        with self.assertRaisesRegex(ValueError, rf"\.{domain} must be a positive integer"):
+                            load_curation_token_limits(root)
+
+    def test_role_and_other_config_loaders_accept_both_curation_tables(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             (root / "rightmemory.toml").write_text(
-                '[agent_cli]\nprovider="codex"\n[curation.batch]\ntrigger_candidates=15\n',
+                '[agent_cli]\nprovider="codex"\n'
+                '[curation.batch]\ntrigger_candidates=15\n'
+                '[curation.token_limits]\nmemory=111\nguidance=222\nskills=333\n',
                 encoding="utf-8",
             )
+            self.assertEqual(load_curation_batch_config(root).trigger_candidates, 15)
+            self.assertEqual(load_curation_token_limits(root), CurationTokenLimits(111, 222, 333))
             for role in ("update", "retrieve", "guidance-curator", "skills-curator"):
                 self.assertEqual(load_config(role, root).role, role)
             load_sync_config(root)
@@ -878,6 +923,80 @@ class RuntimeTests(unittest.TestCase):
             {"read_detail", "read_markdown", "read_skill", "read_mf", "read_learning", "search_learning"},
         )
 
+    def test_standalone_token_count_tool_is_available_only_for_maintenance_curation(self):
+        root = Path(self.tempdir.name)
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.build_instructions", return_value=""),
+        ):
+            for role in sorted(RUNTIME_ROLES):
+                with self.subTest(role=role):
+                    config = RuntimeConfig(role=role, model_id="openai/test", memory_root=root)
+                    runtime = RightMemoryRuntime(config, curation_mode="maintain")
+                    tool_names = {tool.__name__ for tool in runtime.agent.tools}
+                    self.assertEqual(
+                        "count_curation_tokens" in tool_names,
+                        role in {"update", "guidance-curator", "skills-curator"},
+                    )
+
+    def test_standalone_updates_do_not_count_retained_text_or_expose_count_tool(self):
+        root = Path(self.tempdir.name)
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.build_instructions", return_value=""),
+            patch.object(
+                RightMemoryRuntime, "count_curation_tokens", autospec=True,
+                side_effect=AssertionError("unexpected token count"),
+            ),
+        ):
+            for role in ("update", "guidance-curator", "skills-curator"):
+                for mode in (None, "update"):
+                    with self.subTest(role=role, mode=mode):
+                        config = RuntimeConfig(role=role, model_id="openai/test", memory_root=root)
+                        runtime = RightMemoryRuntime(config, curation_mode=mode)
+                        tool_names = {tool.__name__ for tool in runtime.agent.tools}
+                        self.assertNotIn("count_curation_tokens", tool_names)
+
+    def test_standalone_token_count_uses_edited_files_and_current_active_config(self):
+        root = Path(self.tempdir.name)
+        active = root / "active"
+        edited = root / "edited"
+        active.mkdir()
+        edited.mkdir()
+        active_config = active / "rightmemory.toml"
+        active_config.write_text("[curation.token_limits]\nmemory=1\n", encoding="utf-8")
+        (edited / "rightmemory.toml").write_text("[curation.token_limits]\nmemory=99\n", encoding="utf-8")
+        (active / "MEMORY.md").write_text("hello hello hello", encoding="utf-8")
+        edited_memory = edited / "MEMORY.md"
+        edited_memory.write_text("hello", encoding="utf-8")
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=edited, state_root=active)
+
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.build_instructions", return_value="") as build,
+        ):
+            runtime = RightMemoryRuntime(config, curation_mode="maintain")
+            build.assert_called_once_with(edited, "update", curation_mode="maintain")
+            count = next(tool for tool in runtime.agent.tools if tool.__name__ == "count_curation_tokens")
+
+            at_limit = count()
+            self.assertEqual(at_limit["domain"], "memory")
+            self.assertEqual(at_limit["retained_text_tokens"], 1)
+            self.assertEqual(at_limit["token_limit"], 1)
+            self.assertFalse(at_limit["over_limit"])
+
+            edited_memory.write_text("hello hello", encoding="utf-8")
+            over_limit = count()
+            self.assertEqual(over_limit["retained_text_tokens"], 2)
+            self.assertEqual(over_limit["remaining_tokens"], -1)
+            self.assertTrue(over_limit["over_limit"])
+
+            active_config.write_text("[curation.token_limits]\nmemory=3\n", encoding="utf-8")
+            under_limit = count()
+            self.assertEqual(under_limit["token_limit"], 3)
+            self.assertEqual(under_limit["remaining_tokens"], 1)
+            self.assertFalse(under_limit["over_limit"])
+
     def test_cli_agent_runtime_uses_executor_without_pydantic_agent(self):
         codex_runner = object()
         config = RuntimeConfig(
@@ -903,6 +1022,8 @@ class RuntimeTests(unittest.TestCase):
             AgentCliConfig(provider="codex"),
             codex_runner=codex_runner,
             state_root=Path(self.tempdir.name),
+            curation_config_root=Path(self.tempdir.name),
+            curation_mode=None,
             fresh_provider_session=False,
             trace_event=runtime._trace,
         )
@@ -1017,15 +1138,15 @@ class RuntimeTests(unittest.TestCase):
         main_root = Path(self.tempdir.name)
         worktree = main_root / ".runtime" / "worktrees" / "update-123"
         state_root = main_root / ".runtime" / "isolated-state" / "update-123"
-        nested_configs = []
+        nested_settings = []
         calls = []
         trace = object()
 
         class FakeNestedRuntime:
-            def __init__(self, config, *, codex_runner=None):
+            def __init__(self, config, *, codex_runner=None, curation_config_root=None, curation_mode=None):
                 self.config = config
                 self._active_trace = None
-                nested_configs.append(config)
+                nested_settings.append((config, curation_config_root, curation_mode))
 
             def _run_locked_turn(self, callback, *, isolate_write=False):
                 calls.append(("locked", isolate_write))
@@ -1045,18 +1166,23 @@ class RuntimeTests(unittest.TestCase):
             sync=load_sync_config_for_test(main_root, enabled=True),
         )
 
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
+        with (
+            patch.dict("sys.modules", self._fake_pydantic_modules()),
+            patch("rightmemory.runtime.build_instructions", return_value=""),
+        ):
+            runtime = RightMemoryRuntime(config, curation_mode="maintain")
         runtime._active_trace = trace
 
         with patch("rightmemory.runtime.RightMemoryRuntime", FakeNestedRuntime):
             result = runtime._run_session_turn_in_worktree(worktree, state_root, "agent-session", "remember one")
 
         self.assertEqual(result, "model result")
-        self.assertEqual(len(nested_configs), 1)
-        nested_config = nested_configs[0]
+        self.assertEqual(len(nested_settings), 1)
+        nested_config, curation_config_root, curation_mode = nested_settings[0]
         self.assertEqual(nested_config.memory_root, worktree)
         self.assertEqual(nested_config.state_root, state_root)
+        self.assertEqual(curation_config_root, main_root)
+        self.assertEqual(curation_mode, "maintain")
         self.assertFalse(nested_config.fresh_provider_session)
         self.assertFalse(nested_config.sync.enabled)
         self.assertEqual(nested_config.sync.memory_root, worktree)
@@ -1071,18 +1197,19 @@ class RuntimeTests(unittest.TestCase):
 
     def test_isolated_worktree_runtime_uses_cli_agent_path(self):
         main_root = Path(self.tempdir.name)
-        worktree = main_root / ".runtime" / "worktrees" / "pruner-123"
-        state_root = main_root / ".runtime" / "isolated-state" / "pruner-123"
+        worktree = main_root / ".runtime" / "worktrees" / "curator-123"
+        state_root = main_root / ".runtime" / "isolated-state" / "curator-123"
         nested_configs = []
-        nested_runners = []
+        nested_contexts = []
         calls = []
         codex_runner = object()
+        active_config_root = main_root / "active"
 
         class FakeNestedRuntime:
-            def __init__(self, config, *, codex_runner=None):
+            def __init__(self, config, *, codex_runner=None, curation_config_root=None, curation_mode=None):
                 self.config = config
                 nested_configs.append(config)
-                nested_runners.append(codex_runner)
+                nested_contexts.append((codex_runner, curation_config_root, curation_mode))
 
             def _run_locked_turn(self, callback, *, isolate_write=False):
                 calls.append(("locked", isolate_write))
@@ -1096,15 +1223,18 @@ class RuntimeTests(unittest.TestCase):
                 calls.append(("cleanup",))
 
         config = RuntimeConfig(
-            role="pruner",
+            role="guidance-curator",
             runtime_mode="cli-agent",
             agent_cli=AgentCliConfig(provider="codex"),
             memory_root=main_root,
             sync=load_sync_config_for_test(main_root, enabled=True),
         )
 
-        with patch("rightmemory.runtime.CliAgentExecutor"):
-            runtime = RightMemoryRuntime(config, codex_runner=codex_runner)
+        with patch("rightmemory.runtime.CliAgentExecutor") as executor_class:
+            runtime = RightMemoryRuntime(
+                config, codex_runner=codex_runner, curation_config_root=active_config_root,
+                curation_mode="maintain",
+            )
 
         with patch("rightmemory.runtime.RightMemoryRuntime", FakeNestedRuntime):
             result = runtime._run_session_turn_in_worktree(worktree, state_root, "agent-session", "prune one")
@@ -1114,7 +1244,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(nested_configs[0].state_root, state_root)
         self.assertTrue(nested_configs[0].fresh_provider_session)
         self.assertFalse(nested_configs[0].sync.enabled)
-        self.assertEqual(nested_runners, [codex_runner])
+        self.assertEqual(executor_class.call_args.kwargs["curation_mode"], "maintain")
+        self.assertEqual(nested_contexts, [(codex_runner, active_config_root, "maintain")])
         self.assertEqual(
             calls,
             [
@@ -1127,6 +1258,7 @@ class RuntimeTests(unittest.TestCase):
     def test_nested_worktree_runtime_does_not_reisolate(self):
         main_root = Path(self.tempdir.name)
         worktree = main_root / ".runtime" / "worktrees" / "update-123"
+        worktree.mkdir(parents=True)
         config = RuntimeConfig(
             role="update",
             model_id="openai/test",
@@ -2159,6 +2291,7 @@ class RuntimeTests(unittest.TestCase):
             memory_root=Path(self.tempdir.name),
             state_root=Path(self.tempdir.name) / "state",
         )
+        config.state_root.mkdir()
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -2176,6 +2309,7 @@ class RuntimeTests(unittest.TestCase):
             state_root=Path(self.tempdir.name) / "state",
             sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
         )
+        config.state_root.mkdir()
 
         with (
             patch.dict("sys.modules", self._fake_pydantic_modules()),
@@ -2220,6 +2354,7 @@ class RuntimeTests(unittest.TestCase):
             state_root=Path(self.tempdir.name) / "state",
             sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
         )
+        config.state_root.mkdir()
 
         with (
             patch.dict("sys.modules", self._fake_pydantic_modules()),
@@ -2255,6 +2390,7 @@ class RuntimeTests(unittest.TestCase):
             state_root=Path(self.tempdir.name) / "state",
             sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
         )
+        config.state_root.mkdir()
 
         with (
             patch.dict("sys.modules", self._fake_pydantic_modules()),
@@ -2384,6 +2520,7 @@ class RuntimeTests(unittest.TestCase):
             state_root=Path(self.tempdir.name) / "state",
             sync=load_sync_config_for_test(Path(self.tempdir.name), enabled=True),
         )
+        config.state_root.mkdir()
 
         with (
             patch.dict("sys.modules", self._fake_pydantic_modules()),
@@ -2702,6 +2839,7 @@ class RuntimeTests(unittest.TestCase):
             memory_root=Path(self.tempdir.name) / "memory",
             state_root=Path(self.tempdir.name),
         )
+        config.memory_root.mkdir()
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -2742,6 +2880,7 @@ class RuntimeTests(unittest.TestCase):
             memory_root=Path(self.tempdir.name) / "memory",
             state_root=Path(self.tempdir.name),
         )
+        config.memory_root.mkdir()
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)
@@ -2925,7 +3064,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("id must contain only letters", str(caught.exception))
 
     def test_runtime_exposes_commit_tools(self):
-        config = RuntimeConfig(role="update", model_id="openai/test")
+        config = RuntimeConfig(role="update", model_id="openai/test", memory_root=Path(self.tempdir.name))
 
         with patch.dict("sys.modules", self._fake_pydantic_modules()):
             runtime = RightMemoryRuntime(config)

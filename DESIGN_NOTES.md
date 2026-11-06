@@ -16,9 +16,37 @@ second history collection. Processing receipts retain identities and hashes; Git
 its existing history.
 
 Update and Maintain share the same domain intent and publication boundary. Update
-starts from a bounded candidate batch. Maintain starts from existing material in the
-requested scope and does not consume pending evidence. The program owns claims,
-processing records, withdrawal, and cleanup; models judge and edit curated content.
+starts from a bounded candidate batch. Maintain reassesses related records as a
+collection within the requested scope, deciding what should remain and whose future
+work it helps. Deletion is the primary way to reduce accumulated material; compaction
+improves retained content while preserving the concrete context needed to use it.
+Repeated compaction can erase the circumstances that make a record understandable
+and applicable. The domain's learning purpose remains
+the same. Maintenance does not consume pending evidence.
+The program owns claims, processing records, withdrawal, and cleanup; models judge
+and edit curated content.
+
+Maintenance uses separate retained-text ceilings for ordinary Memory (16,000 tokens), guidance
+and correction cases (4,000), and experiences and skills (24,000). Guidance has the
+smallest allowance because broadly applied behavioral instructions should stay
+selective; ordinary context needs more room for distinct circumstances; reusable
+work cases and supporting resources need the most. These are adjustable starting
+limits, not measured optima. Sharing one pool would let one domain's growth crowd
+out another purpose. Spare capacity does not make low-value content worth retaining.
+
+The program measures complete domain-owned text with one bundled, pinned tokenizer
+and enforces the configured ceiling when maintenance publishes. Ordinary updates
+have no token cap: making room while judging incoming evidence would divide the
+agent's attention and may degrade deletion or compaction decisions. Updates can grow
+the retained state again; requested maintenance owns the broader cleanup judgment.
+The shared maintenance instructions are supplied only for that task mode.
+A cap cannot establish semantic quality or authorize broader edits. Counting includes
+unreferenced files and skill text resources so moving text into a backing file does
+not evade the limit; binary resources are reported separately. The active root owns
+the settings while isolated worktrees supply the text being measured. Caps are not
+graph validity rules: an oversized root remains readable and accepts ordinary updates,
+while an over-limit maintenance result cannot publish. Maintenance leaves pending
+evidence for Update to process.
 
 Batch readiness and batch size serve separate purposes. Count and waiting-time
 triggers let related evidence accumulate and reduce repeated model work; size bounds

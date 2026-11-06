@@ -718,6 +718,45 @@ class CliAgentExecutorTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_curator_cli_turn_counts_retained_text_only_for_maintenance(self):
+        cases = (
+            ("update", None, None),
+            ("update", "update", None),
+            ("guidance-curator", "update", None),
+            ("skills-curator", "update", None),
+            ("pruner", "maintain", None),
+            ("update", "maintain", "memory"),
+            ("guidance-curator", "maintain", "guidance"),
+            ("skills-curator", "maintain", "skills"),
+        )
+        for role, mode, domain in cases:
+            with (
+                self.subTest(role=role, mode=mode),
+                tempfile.TemporaryDirectory() as tempdir,
+                patch("rightmemory.agent_cli.build_cli_agent_instructions", return_value="") as build,
+                patch("rightmemory.curation_budget.domain_budget", return_value={
+                    "retained_text_tokens": 0, "token_limit": 100, "encoding": "o200k_base",
+                }) as count,
+            ):
+                worktree = Path(tempdir) / "worktree"
+                worktree.mkdir()
+                config_root = Path(tempdir) / "active"
+                executor = CliAgentExecutor(
+                    worktree, role, AgentCliConfig(provider="codex"),
+                    state_root=Path(tempdir) / "state",
+                    codex_runner=FakeCodexRunner(),
+                    curation_config_root=config_root,
+                    curation_mode=mode,
+                )
+
+                self.assertEqual(executor.run_turn("perform task"), "done")
+
+                build.assert_called_once_with(worktree, role, curation_mode=mode)
+                if domain is None:
+                    count.assert_not_called()
+                else:
+                    count.assert_called_once_with(worktree, domain, state_root=config_root)
+
     def test_opportunistic_cleanup_runs_only_for_top_level_state_root(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

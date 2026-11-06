@@ -402,7 +402,7 @@ One `rightmemory submit` call records evidence for all three curators. Submissio
 
 Configured submission wakes one curation worker, which runs ready domains through their configured executors. Native execution uses model-free `curate begin`, delegates the prepared worktree to a native agent, and calls `curate complete`. Updates process bounded batches; remaining candidates stay pending for later batches. Each domain can complete without a semantic edit. The program removes a raw candidate after all three domains finish, leaving whatever context, guidance, cases, or experience the curators retained.
 
-All three maintenance skills use the same preparation and completion controls with `--mode maintain --scope`. Maintenance starts from scoped existing material and does not consume pending candidates. The program validates allowed changes and controls publication; agents use the domain's shared core to judge the content.
+All three maintenance skills use the same preparation and completion controls with `--mode maintain --scope`. Maintenance reassesses related material as a collection within the requested scope, deciding what should remain and whose future work it helps. Deletion is the primary way to reduce accumulated material. Compaction removes redundancy from retained content while preserving the concrete context needed to understand and use it. Maintenance does not consume pending candidates. The program validates allowed changes and controls publication; agents use the domain's shared core to judge the content.
 
 Retrieve considers relevant graph context, guidance, correction cases, experiences, skills, and pending evidence. Current user instructions and current evidence take precedence over stale or overbroad stored interpretations. Applicable guidance should affect the work itself.
 
@@ -417,6 +417,7 @@ rightmemory/prompts/retrieve.md
 rightmemory/prompts/update.md
 rightmemory/prompts/guidance-curator.md
 rightmemory/prompts/skills-curator.md
+rightmemory/prompts/curation-maintenance.md
 rightmemory/prompts/insight.md
 rightmemory/prompts/historian.md
 rightmemory/prompts/pruner.md
@@ -424,6 +425,10 @@ rightmemory/prompts/sync-reconciler.md
 ```
 
 The internal executor modes use these files through the `rightmemory` runtime; native assistant tasks receive the same domain cores and role instructions. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent through the Codex SDK or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The automatic orchestrator skill owns the host agent's retrieval decision, evidence threshold, and natural-boundary timing; the canonical prompts and shared domain cores own the bounded retrieval and curation roles behind its commands. Optional source skills define their narrower workflows when installed manually.
+
+`curation-maintenance.md` supplies shared deletion, compaction, and size guidance
+when a task's mode is `maintain`. Maintenance skills load it through the prepared
+task's instructions; ordinary updates do not receive it.
 
 Package-owned references complement the prompts: the schema defines representation; Memory, Agent Guidance, Work Skills, Pursuit, Agent Corrections, RightMemory Edit Feedback, and Shared View rules define focused semantics; and the [Retrieve runtime contract](rightmemory/reference/RETRIEVE_CONTRACT.md) owns Retrieve's input snapshot and terminal-selection mechanics. Each requested domain maintenance skill uses its corresponding package-owned core.
 
@@ -497,8 +502,10 @@ Every executor uses the same submission and curation lifecycle. `curate begin` p
 rightmemory retrieve --session <agent-session-id> "find memory about the standalone mode"
 rightmemory submit --root <memory-root> --session <agent-session-id> --request-id <id> --file <evidence.txt>
 rightmemory curate --root <memory-root> status
+rightmemory curate --root <memory-root> count --domain guidance
 rightmemory curate --root <memory-root> run --domain memory --mode update
 rightmemory curate --root <memory-root> begin --domain skills --mode maintain --scope "improve the report workflow"
+rightmemory curate --root <memory-root> count --domain skills --task <task-id>
 rightmemory curate --root <memory-root> complete --task <task-id>
 rightmemory curate --root <memory-root> begin --domain skills --retry <task-id>
 rightmemory curate --root <memory-root> withdraw --candidate <candidate-id>
@@ -568,6 +575,55 @@ The runtime is intentionally small:
 - The local [MCP stdio adapter](docs/MCP.md) exposes retrieval and submission through the same runtime and shared candidate store as the CLI. Native assistant MCP also exposes model-free curation controls for worker coordination; manual configured execution uses `rightmemory curate run`.
 
 ### Curation Execution and Recovery
+
+Maintenance brings each domain within an independent retained-text ceiling.
+Updates have no token cap and receive no budget instructions or counting task;
+they remain focused on learning from the incoming evidence. Defaults can be overridden
+with positive integers in `rightmemory.toml`:
+
+```toml
+[curation.token_limits]
+memory = 16000
+guidance = 4000
+skills = 24000
+```
+
+Unused capacity does not transfer between domains. These are maintenance ceilings,
+not targets to fill or reasons to retain weak material below the ceiling. Maintenance
+judges what is worth retaining and uses deletion as the main way to reduce accumulated
+material. Compaction preserves enough concrete context for future use; repeatedly
+compressing everything into abstract statements can make it harder to understand and
+apply. If the requested scope does not allow enough cleanup, the task reports the
+remaining excess.
+
+`curate count --domain <domain>` reports the total, limit, remaining capacity,
+per-file counts, and binary assets. Add `--task <task-id>` to measure that task's
+edited worktree against the active root's settings. Native assistant MCP exposes
+the same operation as `rightmemory_count_curation_tokens`; standalone maintenance agents
+receive `count_curation_tokens`. CLI-agent maintenance instructions supply a count command
+with `--config-root <active-root>` when content and configuration live separately.
+Counting is read-only and makes no model call.
+
+The count covers all text in the domain's writable files, including untracked edits
+and unreferenced backing files: ordinary Memory documents; guidance and its two
+correction collections; or experiences, skill documents, and text resources inside
+skill packages. Pending evidence, Pursuits, history, and root runtime state are
+outside these totals. Recognized binary assets are reported by path and byte size
+instead of charged as text. Owned links, unreadable files, and unsupported non-UTF-8
+files fail counting rather than silently disappearing from the total.
+
+The fixed counting unit is `o200k_base` from `tiktoken==0.13.0`, with its encoding
+data bundled for offline use. Files are encoded separately as UTF-8 text after
+normalizing line endings; markup and special-token-looking strings count as ordinary
+text. This is a stable storage measure, not a claim about any model's exact prompt
+usage or the quality of retained content.
+
+Maintenance completion checks the assigned domain's limit before publishing,
+including no-change judgments and recovered prepared results. An over-limit
+maintenance result leaves active state unchanged. Existing oversized roots remain
+readable and can accept ordinary updates; new learning may grow a domain beyond its
+maintenance ceiling again. Use requested domain maintenance to bring it back within
+the ceiling. Agent Correction collections retain their existing entry limits too.
 
 Memory, guidance, and skills accumulate pending evidence independently. Their shared
 batch settings live in `rightmemory.toml`:

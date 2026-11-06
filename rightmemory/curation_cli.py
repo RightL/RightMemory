@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from .config import default_memory_root
+from .curation_budget import domain_budget
 from .curation_worker import CurationWorker, default_executor
 from .learning import LEARNING_DOMAINS
 from .learning_service import LearningService
@@ -76,6 +77,11 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
         complete.add_argument("--output-file", type=Path)
         status = commands.add_parser("status")
         status.add_argument("--task")
+        count = commands.add_parser("count", help="Count retained tokens for a domain.")
+        count.add_argument("--domain", choices=LEARNING_DOMAINS, required=True)
+        count_source = count.add_mutually_exclusive_group()
+        count_source.add_argument("--task", help="Count the worktree for a prepared task.")
+        count_source.add_argument("--config-root", type=Path, help="Read limits from this root when counting a worktree directly.")
         withdraw = commands.add_parser("withdraw")
         withdraw.add_argument("--candidate", required=True)
         worker = commands.add_parser("worker")
@@ -89,6 +95,12 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
             if args.action == "stop":
                 return {"stopped": worker.stop(), **worker.status()}
             return worker.status()
+        if args.command == "count" and args.config_root is not None:
+            config_root = args.config_root.expanduser().resolve()
+            return {
+                "ok": True, "active_root": str(config_root), "task_id": None,
+                **domain_budget(root, args.domain, state_root=config_root),
+            }
         service = LearningService(root)
         if args.command == "begin":
             return service.begin(args.domain, mode=args.mode, scope=args.scope, retry_task=args.retry)
@@ -97,6 +109,8 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
         if args.command == "complete":
             output = "" if args.output_file is None else args.output_file.read_text(encoding="utf-8")
             return service.complete(args.task, output)
+        if args.command == "count":
+            return service.count(args.domain, args.task)
         if args.command == "withdraw":
             return service.withdraw(args.candidate)
         return service.status(args.task)
