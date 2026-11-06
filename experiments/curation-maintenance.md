@@ -105,6 +105,14 @@ replacing only the role paragraph. Installed executable behavior remains separat
 from those text definitions. This tests the combined revised prompts, not the
 isolated effect of the collection-level sentence.
 
+A later preparation audit found that this run retained one installed task-wrapper
+sentence that the branch had removed: "Preserve a useful case or experience in
+curated content when it should remain after processing." The role and reference
+overlays were complete, but this generated wrapper text was not. The results below
+therefore do not test every branch wording change. The token-budget run corrects
+that discrepancy and preserves its exact prompt diff; the earlier outputs remain
+unchanged.
+
 Before inspecting the new outputs, review selected these decisions:
 
 - Compare the handoff failures in the delegation and worker-status experiences.
@@ -219,9 +227,161 @@ After the user challenged the dropped deletion priority, the three role prompts
 restored **deletion and compaction as primary actions**, retaining the collection-level
 judgment. The experience rules and submission description now compare added value
 against what the acting agent itself can work out, do, or readily discover, rather
-than a hypothetical capable agent. These corrections have not been replayed. The
-results above remain measurements of `a4675a2`; no retained-memory token budget was
-implemented as part of this correction.
+than a hypothetical capable agent. The results above remain measurements of
+`a4675a2`. The following experiment tests the corrected wording together with a
+retained-text budget; the correction itself added no production budget.
+
+## Token-budget maintenance
+
+This simulation uses the full corrected definitions at `0317c6b`, Astra/xhigh,
+and the same frozen semantic state. Each domain receives a target of at most half
+its initial retained-text token count, rounded down, and a deterministic counting
+command it can use while editing. The target is an experimental constraint, not an
+estimate of how much content is useless or a production retention limit.
+
+Token measurement uses installed `tiktoken` 0.13.0 with explicit `o200k_base`.
+That installed release cannot map `gpt-6-astra` automatically. Counts are exact for
+this named local encoding, not verified Astra request or billing counts. Text is
+decoded as UTF-8, line endings normalized to LF, special-token-looking strings
+treated as ordinary text, and files encoded separately before summing. Counting
+includes retained text and markup in domain-owned semantic files; other domains,
+Pursuit, runtime/Git state, and pending evidence are outside that domain's budget.
+The counter reports non-text assets separately rather than claiming they have no
+size. No private text is sent to a token-counting endpoint.
+
+OpenAI's [token-counting guide](https://developers.openai.com/api/docs/guides/token-counting)
+distinguishes local plain-text tokenization from full request counts, which also
+include message and tool formatting. The stored-text budget deliberately measures
+the former. The experiment records the encoding/version and implementation
+fingerprints and remeasures earlier candidates with the same counter.
+
+The private counter uses captured, hash-checked public encoding data and needs no
+network access. Its count is repeatable across the prepared native worktree command
+and the frozen input. Before model execution, the generated instruction file and
+effective model prompt are aligned with the branch's wrapper wording, removing
+exactly the obsolete sentence described above. Native task and candidate-manifest
+hashes remain unchanged. Original instructions, effective instructions, their diff,
+and source hashes are preserved alongside each run.
+
+### Counting cost and starting budgets
+
+The November 6 benchmark counted 33 domain-owned text files, totaling 334,359 bytes
+and 71,363 tokens. Each fresh command was measured three times on this Windows
+machine with the installed Python 3.14.0 and existing disk caches. The median full
+command took 1.62 seconds for skills, 1.55 seconds for guidance, and 1.54 seconds for
+ordinary Memory. With the encoding and text already loaded, counting all three
+domains took a median 27.8 milliseconds over seven passes (31.25 milliseconds of CPU
+time). The latter excludes file selection, reading, interpreter startup, and encoding
+loading; it is not an end-to-end command time or a cold-machine measurement.
+
+| Domain | Frozen input | Earlier maintenance-purpose raw | Collection-level raw | New target |
+| --- | ---: | ---: | ---: | ---: |
+| Work experience and skills | 37,760 | 31,776 | 33,653 | 18,880 |
+| Guidance and correction cases | 8,815 | 7,250 | 7,108 | 4,407 |
+| Ordinary Memory | 24,788 | 20,022 | 23,477 | 12,394 |
+
+All values in this table use the same local token counter. The comparison columns
+measure unadjusted model output, while targets are half the frozen input rounded
+down. Counting itself requires neither a GPU nor model execution. The separate
+Astra maintenance runs still consume model time and tokens.
+
+Review reuses the predeclared collection-level cases above and examines any newly
+removed records. It also checks the previously observed moved-section locator and
+saved-test build-preservation defects. These case-specific checks remain outside
+model input. Both budget compliance and useful meaning matter; an unmet target is
+reported rather than described as a successful budgeted cleanup. Restored deletion
+priority, the self-capability comparison, and the budget differ from `a4675a2`, so
+this run evaluates their combined behavior rather than isolating the budget's effect.
+
+### Results and meaning review
+
+All three Astra/xhigh turns completed and met their individual targets. Independent
+recounts matched the model-runner measurements. The raw combined output contains
+32,267 tokens, 54.8% below the frozen input; the reviewed output contains 32,375,
+54.6% below it. These reductions measure text volume, not a proven fraction of
+useless memory.
+The concurrent maintenance turns took about 9.2 minutes for guidance, 11.9 minutes
+for skills, and 18.1 minutes for ordinary Memory. Those are complete model-driven
+maintenance turns, separate from the local counting timings above and the later
+operator review/completion work.
+
+| Domain | Frozen tokens | Target | Raw output | Reviewed output |
+| --- | ---: | ---: | ---: | ---: |
+| Work experience and skills | 37,760 | 18,880 | 16,536 | 16,578 |
+| Guidance and correction cases | 8,815 | 4,407 | 3,368 | 3,413 |
+| Ordinary Memory | 24,788 | 12,394 | 12,363 | 12,384 |
+
+Skills removes two experience files, merging worker-status diagnosis into the
+delegation experience and dropping the user-feedback implementation recipe while
+retaining the user's text-only/manual-reading choice in guidance and Memory. The
+merged case preserves stale progress, retries within one attempt, handoff failure,
+and exact artifact identity as distinct observations. Other rewrites retain the
+backpack scope error, assignment-based reading for both main and specialists, the
+exact Quad comparison and fresh-native versus saved-ZRemesher distinction, and
+bounded experimental conclusions. There is substantial useful deletion within
+retained files, not just shorter sentences.
+
+Ordinary Memory removes or merges 53 nodes and one heading. It consolidates resource
+locations and API contracts, reduces project implementation and research ledgers,
+and preserves ownership, valid partial results, the CloudPlatform bilingual-output
+choice, H3's motion objective versus the separate fixed-position demo, and the limits
+of multiview comparisons. The combined raw copy validates with 210 IDs across ten
+graph files. No references to removed IDs or filenames, broken local Markdown
+targets, or writes outside the assigned domains were found. Structural validation
+does not establish selection quality.
+
+Review found three groups of defects:
+
+- Guidance again removes the lettering-design correction: lessons are removable
+  correction records, the design should accommodate other scenarios and contributed
+  skills, and no replacement architecture was settled. No equivalent survives in
+  the combined raw collection. Meanwhile, named-chat LiteWorker overrides remain;
+  reaching the budget did not reliably select the least useful history.
+- The screening experience presents initial static-source criteria too directly
+  and upgrades a configured report package into a claim that it exists. Ordinary
+  Memory still carries the initial dark/static policy despite later guidance
+  explicitly superseding it. The latest decisions survive elsewhere in the raw
+  collection, but separate retrieval can expose the obsolete version.
+- Viewer deployment again drops saved **tests** from build preservation and omits
+  new rerun drafts from the routes that select an activated build. No build was
+  actually deleted here; the retained instruction has a narrower future effect.
+
+The reviewed copy restores the compact lettering case and both build scopes,
+marks the screening experience as historical with a current-guidance pointer, and
+restores its configured-output qualification. Ordinary Memory now records the later
+moving-all-dark, fully-static, and out-of-range-color choices, together with the
+whole-interval position-and-color interpretation of `near_static`, unaccepted
+numeric cutoffs, and unverified source time units. Guidance's cross-reference is
+aligned with that reconciliation. These are five file corrections across the three
+domains, totaling 108 additional tokens. All individual caps still hold; ordinary
+Memory has only ten tokens of headroom. Exact operator diffs and hashes are separate
+from the unchanged raw candidates.
+
+The root read the resulting ordinary Memory and all removed-record text, comparing
+meaning with retained context. Five access records had identical prose; the sixth
+was shortened without changing its host/account distinction. A separate review
+covered all three guidance files and all 27 changed or removed learning files.
+This supports the specific preservation findings, not a claim of lossless cleanup:
+some niche technical observations were removed, external project artifacts were
+unavailable, and future retrieval/task performance was not measured.
+
+All three model turns were blocked from committing by the sandbox's Git-metadata
+restriction, as in earlier runs. After semantic review, the operator committed the
+reviewed changes and ran the supplied native completion commands only in the
+disposable roots. All three received completed receipts, with published inventories
+matching the reviewed worktrees. The reviewed combined copy passes the same graph
+and local-reference checks. Initial blocked status, raw outputs, exact review
+adjustments, and final receipts remain separate; this is not an unaided end-to-end
+model success. The completed temporary repositories were removed after their
+evidence was captured. Live Memory and the installation were unchanged.
+
+The experiment supports using a measured budget to press maintenance toward real
+deletion and compaction. It does not establish half the current size as an optimal
+permanent limit, nor show that meeting a size target preserves every useful choice.
+The known errors recur even when substantial headroom remains, so an excessively
+tight cap is not their sole explanation. Retention judgment and review remain
+necessary; being below the cap is not permission to accumulate low-value material.
+No production token limit or live-memory cleanup is introduced by this experiment.
 
 ## Enhanced-prompt results
 
@@ -293,6 +453,18 @@ Neither the installation nor live Memory is modified. Native task instructions,
 loaded source hashes, reference-command checks, frozen root instructions, and model
 configuration are retained with the output. The selected semantic review cases are
 not part of model input.
+
+The token-budget variant uses the same private runner with `<domain> token-budget
+--prepare --prompt-revision 0317c6b`, then `<domain> token-budget`. Preparation also
+corrects the obsolete wrapper sentence, captures `maintenance_token_counter.py`
+and the public encoding data, verifies `rightmemory-token-count` inside the native
+worktree, and appends the domain's half-size target to the effective model prompt.
+The exact additional instruction, original/effective prompt diff, counter and
+encoding hashes, and earlier candidates' counts are in each manifest.
+`maintenance_token_count_benchmark.py` records fresh-command and loaded-counter
+timings in `maintenance-token-count-benchmark.json`. The raw combined output,
+reviewed combined output, semantic review, and structural audits are separate private
+artifacts; operator corrections never replace the model's scored output.
 
 For the enhanced variant, create an ignored private JSON input with an `input` object containing `domain`, `mode: "maintain"`, the additional cleanup `scope`, and `candidates: []`. This is a synthetic experiment request, not a historical execution record. Use a new output directory per run:
 
