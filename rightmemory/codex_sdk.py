@@ -446,6 +446,11 @@ def _ephemeral_text_config(codex: Any, cwd: Path, sdk: _CodexSdkBindings) -> dic
     servers = extras.get("mcp_servers", {})
     if not isinstance(servers, dict):
         raise RuntimeError("Codex config/read returned an invalid MCP server map")
+    features = extras.get("features", {})
+    if not isinstance(features, dict):
+        raise RuntimeError("Codex config/read returned an invalid features map")
+    # Unset features can appear as JSON null, which thread/start rejects.
+    features = {name: value for name, value in features.items() if value is not None}
     return {
         "mcp_servers": {name: {"enabled": False} for name in servers},
         "project_doc_max_bytes": 0,
@@ -461,7 +466,9 @@ def _ephemeral_text_config(codex: Any, cwd: Path, sdk: _CodexSdkBindings) -> dic
             "experimental_request_user_input": {"enabled": False},
             "update_plan": {"enabled": False},
         },
+        # Thread-start overrides replace the inherited features table.
         "features": {
+            **features,
             "shell_tool": False,
             "view_image": False,
             "apps": False,
