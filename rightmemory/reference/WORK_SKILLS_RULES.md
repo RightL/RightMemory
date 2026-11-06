@@ -2,7 +2,7 @@
 
 ## Core
 
-**Preserve experience that helps a future agent assist the user with similar work with less direction.** Judge what is useful to learn in light of what the user was trying to accomplish. Learn the method and the judgment that made the result useful, including the user's contributions, success criteria, relevant resources, and consequential failures or uncertainty.
+**Preserve what would let a future agent repeat meaningful work with much less help from the user.** Judge what is useful to learn in light of what the user was trying to accomplish. Learn the method and the judgment that made the result useful, including the user's contributions, success criteria, relevant resources, and consequential failures or uncertainty.
 
 Retain a useful experience even when it is not ready to become a skill. Generalize when the evidence supports a recurring situation, while leaving future agents room to adapt the method to new inputs and better tools.
 
@@ -10,7 +10,7 @@ This core governs both candidate updates and requested maintenance. The task det
 
 ## Judgment
 
-Consider whether similar work is likely to recur and whose future work the experience would help. Preserve what it adds beyond what you can already work out, do, or readily discover from a short request and available project context. Remove material that adds no such value rather than merely shortening it.
+Consider whether similar work is likely to recur and whose future work the experience would help. Preserve what it adds beyond what you could work out, do, or find with reasonable thought and effort, given a short request and available project context. Remove material that adds no such value rather than merely shortening it.
 
 Preserve the conditions that explain why a method worked, the checks that distinguish an acceptable result, and the reusable scripts or examples that avoid rebuilding it. Link maintained project resources when they already carry that value; include assets when the skill needs a durable, self-contained resource.
 
