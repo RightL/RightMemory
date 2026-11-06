@@ -17,6 +17,7 @@ from .session import MemoryWriteLock, _ensure_runtime_gitignore, _fsync_director
 
 LEARNING_DIRECTORY = "learning"
 LEARNING_DOMAINS = ("memory", "guidance", "skills")
+DOMAIN_ROLES = {"memory": "update", "guidance": "guidance-curator", "skills": "skills-curator"}
 _ID_RE = re.compile(r"[0-9a-f]{64}")
 _SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 

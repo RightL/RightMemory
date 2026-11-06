@@ -7,10 +7,113 @@ from rightmemory.isolated_write import (
     IsolatedWriteSupervisor,
     MainMemoryDirtyError,
 )
+from rightmemory.semantic_operation import SemanticOperationStore
 from tests.isolated_write_test_base import IsolatedWriteTestBase
 
 
 class IsolatedWriteCandidateValidationTests(IsolatedWriteTestBase):
+    def _set_token_limits(self, limit):
+        (self.root / ".git/info").mkdir(parents=True, exist_ok=True)
+        with (self.root / ".git/info/exclude").open("a", encoding="utf-8") as stream:
+            stream.write("\n/rightmemory.toml\n")
+        (self.root / "rightmemory.toml").write_text(
+            f"[curation.token_limits]\nmemory = {limit}\nguidance = {limit}\nskills = {limit}\n",
+            encoding="utf-8",
+        )
+
+    def _seed_over_budget_domains(self):
+        cases = (
+            ("update", "MEMORY.md", "# Memory\n\n- `retained` {} → []\n"),
+            ("guidance-curator", "learning/guidance/working.md", "# Working guidance\n\n{}\n"),
+            ("skills-curator", "learning/skills/review/SKILL.md", "# Review\n\n{}\n"),
+        )
+        for _role, relative, template in cases:
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(template.format("retained context " * 100), encoding="utf-8")
+        self._git("add", "MEMORY.md", "learning")
+        self._git("commit", "-m", "seed oversized domains")
+        return cases
+
+    def test_direct_curator_updates_can_exceed_maintenance_budgets(self):
+        cases = self._seed_over_budget_domains()
+        self._set_token_limits(1)
+        for role, relative, template in cases:
+            with self.subTest(role=role):
+                content = template.format("additional retained context " * 100)
+
+                def callback(worktree: Path) -> None:
+                    (worktree / relative).write_text(content, encoding="utf-8")
+                    self._git("add", relative, cwd=worktree)
+                    self._git("commit", "-m", "retain useful update", cwd=worktree)
+
+                result = IsolatedWriteSupervisor(self.root, role).run(callback)
+                self.assertEqual(result.changed_paths, (relative,))
+                self.assertEqual((self.root / relative).read_text(encoding="utf-8"), content)
+                self._assert_isolated_cleanup()
+
+    def test_direct_no_change_ignores_maintenance_budgets(self):
+        cases = self._seed_over_budget_domains()
+        self._set_token_limits(1)
+        head = self._git("rev-parse", "HEAD")
+        for role, _relative, _template in cases:
+            with self.subTest(role=role):
+                operation_id = role + "-uncapped-no-change"
+                result = IsolatedWriteSupervisor(self.root, role).run(
+                    lambda _worktree: "unchanged", operation_id=operation_id,
+                )
+                self.assertEqual(result.commits_landed, 0)
+                self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "no_change")
+                self._assert_isolated_cleanup()
+
+    def test_prepared_update_recovers_after_maintenance_limit_is_lowered(self):
+        cases = self._seed_over_budget_domains()
+        for role, relative, template in cases:
+            with self.subTest(role=role):
+                self._set_token_limits(10000)
+                supervisor = IsolatedWriteSupervisor(self.root, role)
+                operation_id = role + "-uncapped-recovery"
+                content = template.format("additional retained context " * 100)
+
+                def callback(worktree: Path) -> str:
+                    (worktree / relative).write_text(content, encoding="utf-8")
+                    self._git("add", relative, cwd=worktree)
+                    self._git("commit", "-m", "retain useful update", cwd=worktree)
+                    return "updated"
+
+                with patch.object(supervisor, "_land_operation_commit", side_effect=OSError("interrupted")):
+                    with self.assertRaises(OSError):
+                        supervisor.run(callback, operation_id=operation_id)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "prepared")
+                self._set_token_limits(1)
+                result = supervisor.run(
+                    lambda _worktree: self.fail("prepared recovery reran the worker"),
+                    operation_id=operation_id,
+                )
+                self.assertEqual(result.commits_landed, 1)
+                self.assertEqual((self.root / relative).read_text(encoding="utf-8"), content)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "committed")
+                self._assert_isolated_cleanup()
+
+    def test_prepared_no_change_recovers_after_maintenance_limit_is_lowered(self):
+        cases = self._seed_over_budget_domains()
+        head = self._git("rev-parse", "HEAD")
+        for role, _relative, _template in cases:
+            with self.subTest(role=role):
+                self._set_token_limits(10000)
+                supervisor = IsolatedWriteSupervisor(self.root, role)
+                operation_id = role + "-uncapped-no-change-recovery"
+                with patch.object(SemanticOperationStore, "complete_no_change", side_effect=OSError("interrupted")):
+                    with self.assertRaises(OSError):
+                        supervisor.run(lambda _worktree: "unchanged", operation_id=operation_id)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "prepared")
+                self._set_token_limits(1)
+                supervisor.recover_prepared()
+                self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self.assertEqual(SemanticOperationStore(self.root).read(operation_id).phase, "no_change")
+                self._assert_isolated_cleanup()
+
     def test_tree_validation_checks_every_changed_path(self):
         for name in ("MEMORY_safe.md", "MEMORY_unsafe.md"):
             (self.root / name).write_text("content\n", encoding="utf-8")

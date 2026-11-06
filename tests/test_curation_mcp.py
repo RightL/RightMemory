@@ -35,6 +35,9 @@ class Backend:
     def status(self, task_id=None):
         return self._record("status", task_id)
 
+    def count(self, domain, task_id=None):
+        return self._record("count", domain, task_id)
+
 
 class CurationMcpTests(unittest.TestCase):
     def _server(self):
@@ -51,7 +54,8 @@ class CurationMcpTests(unittest.TestCase):
 
         expected = {
             "rightmemory_submit", "rightmemory_begin_curation",
-            "rightmemory_complete_curation", "rightmemory_curation_status", "rightmemory_withdraw_candidate",
+            "rightmemory_complete_curation", "rightmemory_curation_status",
+            "rightmemory_count_curation_tokens", "rightmemory_withdraw_candidate",
         }
         self.assertEqual(asyncio.run(names()), expected)
 
@@ -68,6 +72,8 @@ class CurationMcpTests(unittest.TestCase):
             ("rightmemory_complete_curation", {"task_id": "task"}, ("complete", "task", "")),
             ("rightmemory_curation_status", {"task_id": "task"}, ("status", "task")),
             ("rightmemory_curation_status", {}, ("status", None)),
+            ("rightmemory_count_curation_tokens", {"domain": "memory"}, ("count", "memory", None)),
+            ("rightmemory_count_curation_tokens", {"domain": "skills", "task_id": "task"}, ("count", "skills", "task")),
         ]
 
         async def exercise():
@@ -79,6 +85,21 @@ class CurationMcpTests(unittest.TestCase):
                         self.assertEqual(backend.calls[-1], expected)
                         self.assertEqual(result.structured_content, backend.result)
                         self.assertEqual(len(result.content), 1)
+
+        asyncio.run(exercise())
+
+    def test_count_preserves_structured_error(self):
+        server, backend = self._server()
+        backend.error = ValueError("curator task belongs to a different domain")
+
+        async def exercise():
+            async with Client(server, raise_exceptions=True) as client:
+                result = await client.call_tool(
+                    "rightmemory_count_curation_tokens", {"domain": "guidance", "task_id": "memory-task"},
+                )
+                self.assertTrue(result.is_error)
+                self.assertFalse(result.structured_content["ok"])
+                self.assertEqual(result.structured_content["error"]["type"], "ValueError")
 
         asyncio.run(exercise())
 

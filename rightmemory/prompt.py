@@ -5,6 +5,7 @@ from pathlib import Path
 from shlex import quote
 
 from .config import MEMORY_ROOT_ENV
+from .learning import DOMAIN_ROLES
 from .reference import read_reference
 
 
@@ -24,12 +25,14 @@ ROLE_PROMPTS = {
 def build_cli_agent_instructions(
     memory_root: Path,
     role: str,
+    *,
+    curation_mode: str | None = None,
 ) -> str:
     if role not in ROLE_PROMPTS:
         raise ValueError(f"role must be one of: {_role_list()}")
     schema = read_reference("schema")
     reference_guidance = _role_reference_guidance(role)
-    role_guidance = _read_prompt_file(f"prompts/{role}.md")
+    role_guidance = _role_guidance(role, curation_mode)
     cli_agent_guidance = _cli_agent_guidance(memory_root, role)
     corrections_store = "- corrections.md\n" if role in {
         "update", "sync-reconciler", "guidance-curator", "skills-curator"
@@ -70,12 +73,14 @@ Role instructions:
 def build_instructions(
     memory_root: Path,
     role: str,
+    *,
+    curation_mode: str | None = None,
 ) -> str:
     if role not in ROLE_PROMPTS:
         raise ValueError(f"role must be one of: {_role_list()}")
     schema = read_reference("schema")
     reference_guidance = _role_reference_guidance(role)
-    role_guidance = _read_prompt_file(f"prompts/{role}.md")
+    role_guidance = _role_guidance(role, curation_mode)
     command_guidance = _command_guidance(role)
     sync_guidance = _sync_guidance(role)
     tool_guidance = _tool_guidance(role)
@@ -335,6 +340,14 @@ def _role_reference_guidance(role: str) -> str:
             "\nRetrieve runtime contract:\n"
             f"{read_reference('retrieve-contract')}\n"
         )
+    return guidance
+
+
+def _role_guidance(role: str, curation_mode: str | None) -> str:
+    guidance = _read_prompt_file(f"prompts/{role}.md")
+    if curation_mode == "maintain" and role in DOMAIN_ROLES.values():
+        maintenance = _read_prompt_file("prompts/curation-maintenance.md")
+        return f"{guidance.rstrip()}\n\n{maintenance}"
     return guidance
 
 

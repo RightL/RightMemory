@@ -39,6 +39,10 @@ class CurationCliTests(IsolatedWriteTestBase):
         for domain in ("memory", "guidance", "skills"):
             _, task = self.invoke(["begin", "--domain", domain])
             self.assertEqual(task["status"], "prepared")
+            self.assertNotIn("count_argv", task)
+            code, counted = self.invoke(["count", "--domain", domain, "--task", task["task_id"]])
+            self.assertEqual(code, 0)
+            self.assertEqual(counted["task_id"], task["task_id"])
             _, done = self.invoke(["complete", "--task", task["task_id"]])
             self.assertEqual(done["status"], "completed")
             self.assertEqual(source_id in learning_sources(self.root), domain != "skills")
@@ -78,6 +82,51 @@ class CurationCliTests(IsolatedWriteTestBase):
         self.assertEqual(task["selected_candidate_count"], 0)
         self.invoke(["complete", "--task", task["task_id"]])
         self.assertEqual(len(list_learning_candidates(self.root, domain="memory")), 1)
+
+    def test_count_routes_to_active_root_or_prepared_task(self):
+        code, active = self.invoke(["count", "--domain", "memory"])
+        self.assertEqual(code, 0)
+        self.assertTrue(active["ok"])
+        self.assertEqual(active["active_root"], str(self.root))
+        self.assertIsNone(active["task_id"])
+        self.assertGreater(active["retained_text_tokens"], 0)
+        self.assertFalse((self.root / ".runtime").exists())
+
+        _, task = self.invoke(["begin", "--domain", "memory", "--mode", "maintain"])
+        code, count = self.invoke(task["count_argv"][4:])
+        self.assertEqual(code, 0)
+        self.assertEqual(count["task_id"], task["task_id"])
+        self.assertEqual(count["retained_text_tokens"], active["retained_text_tokens"])
+
+        for args in (
+            ["--domain", "invalid"],
+            ["--domain", "memory", "--task", "invalid"],
+            ["--domain", "guidance", "--task", task["task_id"]],
+        ):
+            with self.subTest(args=args):
+                code, result = self.invoke(["count", *args])
+                self.assertEqual(code, 1)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["type"], "ValueError")
+
+    def test_count_uses_explicit_config_root_for_direct_worktree(self):
+        worktree = self.root / "worktree"
+        worktree.mkdir()
+        (worktree / "rightmemory.toml").write_text("invalid TOML", encoding="utf-8")
+        (worktree / "MEMORY.md").write_text("# Counted memory\n", encoding="utf-8")
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.token_limits]\nmemory = 100\n", encoding="utf-8",
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main([
+                "--root", str(worktree), "count", "--domain", "memory", "--config-root", str(self.root),
+            ])
+        self.assertEqual(code, 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["token_limit"], 100)
+        self.assertGreater(result["retained_text_tokens"], 0)
+        self.assertFalse((worktree / ".runtime").exists())
 
     def test_withdraw_uses_shared_candidate_identity(self):
         _, saved = self.invoke(["--executor", "native", "--session", "s", "Case."], submit=True)

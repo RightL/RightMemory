@@ -2,7 +2,7 @@
 
 ## Core
 
-Memory is durable context that helps a future agent act, decide, interpret, retrieve, or avoid costly rediscovery. It is not a record of everything that happened.
+**Memory is durable context that helps a future agent act, decide, interpret, retrieve, or avoid costly rediscovery.** It is not a record of everything that happened.
 
 Preserve enough of the user's circumstances, intentions, relationships, choices, and reasons for a future agent to understand what matters and act with less repeated explanation. Distinguish evidence, interpretation, and unresolved uncertainty; a compact personality label is rarely a substitute for the context behind a choice.
 
@@ -91,7 +91,7 @@ When an answer becomes clear, place the answer in the appropriate Memory section
 
 ## Maintenance
 
-Update starts from shared candidate evidence; Maintain starts from existing material within the requested scope. Both use this core. Preserve useful ordinary context before completing an update: the program removes a raw candidate after Memory, guidance, and skills have all processed it. Claims and processing receipts are program-owned, and maintenance does not consume pending evidence.
+Update starts from shared candidate evidence; Maintain starts from existing material within the requested scope. Both use this core. Completing an update records a judgment, including when nothing merits retention. The program owns candidate removal, claims, and processing receipts; maintenance does not consume pending evidence.
 
 When evidence changes:
 

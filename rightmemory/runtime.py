@@ -26,6 +26,7 @@ from .automatic_effects import (
 from .config import CURATOR_ROLES, PrunerConfig, RuntimeConfig, load_config
 from .debug import DebugTrace
 from .isolated_write import IsolatedWriteResult, IsolatedWriteSupervisor, MainMemoryDirtyError
+from .learning import DOMAIN_ROLES
 from .prompt import build_instructions
 from .prune import build_pruner_message, prune_due_status
 from .provider_sessions import ProviderSessionStore
@@ -143,10 +144,14 @@ class RightMemoryRuntime:
         config: RuntimeConfig,
         *,
         codex_runner: CodexSdkRunner | None = None,
+        curation_config_root: Path | None = None,
+        curation_mode: str | None = None,
     ):
         if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
+        self._curation_config_root = curation_config_root or config.state_root
+        self._curation_mode = curation_mode
         if config.retrieve_backend not in {"agent", "embedding"}:
             raise ValueError(f"unsupported retrieval backend: {config.retrieve_backend}")
         if config.retrieve_filter is not None and config.retrieve_backend != "embedding":
@@ -1229,7 +1234,11 @@ class RightMemoryRuntime:
             fresh_provider_session=self.config.runtime_mode == "cli-agent",
             sync=replace(self.config.sync, memory_root=worktree, enabled=False),
         )
-        nested = RightMemoryRuntime(nested_config, codex_runner=self._codex_runner)
+        nested = RightMemoryRuntime(
+            nested_config, codex_runner=self._codex_runner,
+            curation_config_root=self._curation_config_root,
+            curation_mode=self._curation_mode,
+        )
         nested._active_trace = self._active_trace
         try:
             if nested.config.runtime_mode == "cli-agent":
@@ -1678,12 +1687,19 @@ class RightMemoryRuntime:
         except ImportError as exc:
             raise RuntimeError("install standalone dependencies with: pip install -e .") from exc
 
+        instructions = build_instructions(
+            self.config.memory_root, self.config.role, curation_mode=self._curation_mode,
+        )
+        if self._curation_mode == "maintain" and self.config.role in DOMAIN_ROLES.values():
+            budget = self.count_curation_tokens()
+            instructions += (
+                f"\n\nRetained-text budget for {budget['domain']}: "
+                f"{budget['retained_text_tokens']:,} of {budget['token_limit']:,} "
+                f"{budget['encoding']} tokens. Use count_curation_tokens to recount edited state.\n"
+            )
         kwargs: dict[str, Any] = {
             "model": build_model(self.config),
-            "instructions": build_instructions(
-                self.config.memory_root,
-                self.config.role,
-            ),
+            "instructions": instructions,
             "tools": self._agent_tools(),
             "retries": self.config.max_tool_retries,
         }
@@ -1714,6 +1730,8 @@ class RightMemoryRuntime:
             raise RuntimeError("cli-agent runtime requires agent_cli config")
         kwargs: dict[str, Any] = {
             "state_root": self.config.state_root,
+            "curation_config_root": self._curation_config_root,
+            "curation_mode": self._curation_mode,
             "fresh_provider_session": self.config.fresh_provider_session,
             "trace_event": self._trace,
         }
@@ -1742,11 +1760,13 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.read_command),
             self._agent_tool(self.tools.outline_file),
         ]
-        if self.config.role in CURATOR_ROLES | {"update"}:
+        if self.config.role in DOMAIN_ROLES.values():
             read_tools.extend([
                 self._agent_tool(self.tools.read_learning),
                 self._agent_tool(self.tools.search_learning),
             ])
+            if self._curation_mode == "maintain":
+                read_tools.append(self._agent_tool(self.count_curation_tokens))
         if self.config.role != "insight":
             read_tools.append(self._agent_tool(self.tools.validate_memory))
         if self.config.role in HISTORY_READ_ROLES:
@@ -1782,6 +1802,17 @@ class RightMemoryRuntime:
         if self.config.sync.enabled and self.config.role in SYNC_TOOL_ROLES:
             write_tools.append(self._agent_tool(self.sync_push))
         return write_tools
+
+    def count_curation_tokens(self) -> dict[str, Any]:
+        """Measure this curator's edited retained text against its independent limit."""
+        from .curation_budget import domain_budget
+
+        domain = next((key for key, role in DOMAIN_ROLES.items() if role == self.config.role), None)
+        if domain is None:
+            raise ValueError("retained-text counting requires a curation role")
+        return domain_budget(
+            self.config.memory_root, domain, state_root=self._curation_config_root,
+        )
 
     def _agent_tool(self, tool: Callable[..., Any]) -> Callable[..., Any]:
         wrapped = _retryable_tool(tool)

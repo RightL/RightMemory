@@ -14,6 +14,7 @@ class CurationBackend(Protocol):
     def begin(self, domain: str, *, mode: str = "update", scope: str = "", retry_task: str | None = None) -> dict[str, Any]: ...
     def complete(self, task_id: str, output: str = "") -> dict[str, Any]: ...
     def status(self, task_id: str | None = None) -> dict[str, Any]: ...
+    def count(self, domain: str, task_id: str | None = None) -> dict[str, Any]: ...
     def withdraw(self, candidate_id: str) -> dict[str, Any]: ...
 
 
@@ -23,16 +24,18 @@ to interpret it. A useful candidate need not already support a stable conclusion
 Memory, guidance, and skills curators judge it against their own domain cores; submission
 does not write a rule, a skill, or a Memory graph entry.
 
-For work evidence, consider whether the situation or a submethod may recur and whether
-the evidence would help a later agent reproduce a meaningful result from a short prompt.
-Preserve the method, human contributions, outcome, and relevant resources. One-off or
-unsettled evidence can still be useful without becoming a general rule. Leave out routine
-progress and copies of project artifacts with no independent future value.
+For work evidence, consider what the user was trying to accomplish and how the experience
+could let a future agent repeat meaningful work with much less help from the user. Preserve the
+method, human contributions, outcome, and relevant resources that carry that value beyond
+what you could work out, do, or find with reasonable thought and effort, given a short
+request and available project context.
+One-off or unsettled evidence can still be useful without becoming a general rule. Leave
+out routine progress and copies of project artifacts with no independent future value.
 
 Combine related evidence at a natural boundary. Reuse request_id and identical evidence
 when retrying the same submission; distinct later occurrences receive new request IDs.
 Pending evidence remains available to retrieval. After the three curators finish, the
-program removes its raw source; curators explicitly preserve useful cases or experiences.
+program removes its raw source.
 Pursuit edits use the separate maintain-pursuit-map workflow."""
 
 
@@ -65,6 +68,10 @@ def register_curation_tools(
     @server.tool(name="rightmemory_curation_status", description="Inspect pending candidates, domain readiness, or a task without starting model work. " + ready_guidance, structured_output=False)
     def status(task_id: str | None = None) -> CallToolResult:
         return _invoke(lambda: selected().status(task_id))
+
+    @server.tool(name="rightmemory_count_curation_tokens", description="Count a domain's retained text and report its maintenance token limit. Supply a task ID to count the edited worktree.", structured_output=False)
+    def count(domain: Literal["memory", "guidance", "skills"], task_id: str | None = None) -> CallToolResult:
+        return _invoke(lambda: selected().count(domain, task_id))
 
     @server.tool(name="rightmemory_withdraw_candidate", description="Withdraw a pending candidate by identity. This prevents further processing; it does not undo already published domain conclusions.", structured_output=False)
     def withdraw(candidate_id: str) -> CallToolResult:

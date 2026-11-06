@@ -87,6 +87,18 @@ class CurationBatchConfig:
 
 
 @dataclass(frozen=True)
+class CurationTokenLimits:
+    memory: int = 16_000
+    guidance: int = 4_000
+    skills: int = 24_000
+
+    def for_domain(self, domain: str) -> int:
+        if domain not in {"memory", "guidance", "skills"}:
+            raise ValueError(f"unknown curation domain: {domain}")
+        return getattr(self, domain)
+
+
+@dataclass(frozen=True)
 class AgentCliConfig:
     provider: str
     model: str | None = None
@@ -324,7 +336,7 @@ def load_curation_batch_config(memory_root: Path | None = None) -> CurationBatch
     section = data.get("curation", {})
     if not isinstance(section, dict):
         raise ValueError("[curation] must be a TOML table")
-    _reject_unknown_keys(section, {"batch"}, "[curation]")
+    _reject_unknown_keys(section, {"batch", "token_limits"}, "[curation]")
     batch = section.get("batch", {})
     if not isinstance(batch, dict):
         raise ValueError("[curation.batch] must be a TOML table")
@@ -339,6 +351,27 @@ def load_curation_batch_config(memory_root: Path | None = None) -> CurationBatch
     if target < trigger:
         raise ValueError("[curation.batch] requires target_batch_candidates >= trigger_candidates")
     return CurationBatchConfig(root, trigger, target, wait)
+
+
+def load_curation_token_limits(memory_root: Path | None = None) -> CurationTokenLimits:
+    root = _active_memory_root(memory_root)
+    data = _load_raw_config(memory_root)
+    if not root.is_dir():
+        raise FileNotFoundError(f"RightMemory memory root does not exist: {root}")
+    _reject_unknown_keys(data, _top_level_keys(), "top-level")
+    section = data.get("curation", {})
+    if not isinstance(section, dict):
+        raise ValueError("[curation] must be a TOML table")
+    _reject_unknown_keys(section, {"batch", "token_limits"}, "[curation]")
+    limits = section.get("token_limits", {})
+    if not isinstance(limits, dict):
+        raise ValueError("[curation.token_limits] must be a TOML table")
+    _reject_unknown_keys(limits, {"memory", "guidance", "skills"}, "[curation.token_limits]")
+    defaults = CurationTokenLimits()
+    return CurationTokenLimits(**{
+        domain: _positive_integer(limits, domain, defaults.for_domain(domain), "[curation.token_limits]")
+        for domain in ("memory", "guidance", "skills")
+    })
 
 
 def _load_raw_config(memory_root: Path | None = None) -> dict[str, object]:
