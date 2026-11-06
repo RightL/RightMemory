@@ -26,7 +26,7 @@ does not write a rule, a skill, or a Memory graph entry.
 For work evidence, consider what the user was trying to accomplish and how the experience
 could help a future agent assist with similar work with less direction. Preserve the
 method, human contributions, outcome, and relevant resources that carry that value beyond
-what an agent can already do or readily discover from a short request and project context.
+what you can already work out, do, or readily discover from a short request and project context.
 One-off or unsettled evidence can still be useful without becoming a general rule. Leave
 out routine progress and copies of project artifacts with no independent future value.
 
