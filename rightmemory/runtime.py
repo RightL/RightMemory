@@ -1492,9 +1492,13 @@ class RightMemoryRuntime:
         self._run_sync_reconciler(result)
 
     def _memory_write_lock(self):
-        # The curation lease covers the parent. Its child needs the worktree lock.
-        parent_owns_lease = self.config.role == CURATION_PARENT_ROLE and self._curation_task_id is not None
-        if parent_owns_lease or self.config.role in {"historian", "retrieve"}:
+        # Curation leases protect the parent and each domain attempt. Distinct
+        # domains can edit their assigned files in the shared candidate concurrently.
+        curation_owns_lease = (
+            self.config.role in {CURATION_PARENT_ROLE, *DOMAIN_ROLES.values()}
+            and self._curation_task_id is not None
+        )
+        if curation_owns_lease or self.config.role in {"historian", "retrieve"}:
             return nullcontext()
         return MemoryWriteLock(self.config.memory_root)
 

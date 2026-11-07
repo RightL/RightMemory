@@ -3,8 +3,11 @@ import hashlib
 import io
 import json
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rightmemory.assistant_write import AssistantStaleVersionError, AssistantWriteManager
@@ -20,6 +23,7 @@ from rightmemory.learning_service import (
     LearningClaimLost,
     LearningService,
 )
+from rightmemory.runtime import RightMemoryRuntime
 from rightmemory.semantic_operation import SemanticOperationStore
 from tests.isolated_write_test_base import IsolatedWriteTestBase
 
@@ -356,6 +360,24 @@ class LearningServiceTests(IsolatedWriteTestBase):
         returned = restarted.complete_child(task_id, "memory", replacement["attempt"], "No change")
         self.assertEqual(returned["status"], "completed")
         self.assertEqual(restarted.complete_child(task_id, "memory", replacement["attempt"], "No change"), returned)
+
+    def test_child_git_guard_can_read_while_the_index_is_locked(self):
+        task = self.service.begin("guidance", mode="maintain")
+        task_id = task["task_id"]
+        worktree = Path(task["worktree"])
+        index = worktree / self._git("rev-parse", "--git-path", "index", cwd=worktree)
+        original_index = index.read_bytes()
+        lock = index.with_name("index.lock")
+        with lock.open("xb") as stream:
+            stream.write(b"held by another Git command")
+        try:
+            child = self.service.begin_child(task_id, "guidance")
+            returned = self.service.complete_child(task_id, "guidance", child["attempt"])
+            self.assertEqual(returned["status"], "completed")
+            self.assertEqual(index.read_bytes(), original_index)
+            self.assertEqual(lock.read_bytes(), b"held by another Git command")
+        finally:
+            lock.unlink(missing_ok=True)
 
     def test_child_git_staging_and_commits_are_rejected(self):
         self._submit()
@@ -762,9 +784,100 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertTrue((self.root / relative).is_file())
         self.assertFalse(list_learning_candidates(self.root))
 
-    def test_configured_child_cannot_edit_a_different_domain(self):
-        self._submit()
-        task = self.service.begin()
+    def test_configured_domain_turns_overlap_until_parent_publication(self):
+        from pydantic_ai import Agent
+        from pydantic_ai.messages import ModelResponse, TextPart
+        from pydantic_ai.models.function import FunctionModel
+
+        for mode in ("standalone", "cli-agent"):
+            with self.subTest(mode=mode):
+                candidate_id = self._submit(request=mode)
+                task = self.service.begin(_executor="configured")
+                task_id = task["task_id"]
+                worktree = Path(task["worktree"])
+                head = self._git("rev-parse", "HEAD")
+                initial_memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+                guidance = f"learning/guidance/{mode}.md"
+                addition = f"\n- `{mode}` reviewed memory → []\n"
+                entered = {"update": Event(), "guidance-curator": Event()}
+                release = Event()
+
+                def turn(runtime):
+                    self.assertEqual(runtime.config.memory_root, worktree)
+                    self.assertEqual(runtime.config.state_root, self.root)
+                    role = runtime.config.role
+                    if role == "update":
+                        self._append_memory(worktree, addition)
+                    elif role == "guidance-curator":
+                        runtime.tools.create_file(guidance, "# Reviewed guidance\n")
+                    if role in entered:
+                        entered[role].set()
+                        self.assertTrue(release.wait(30), "test did not release the domain turn")
+                    return "Reviewed"
+
+                def build_standalone(runtime):
+                    def respond(_messages, _info):
+                        return ModelResponse(parts=[TextPart(turn(runtime))])
+
+                    return Agent(FunctionModel(respond))
+
+                def build_cli(runtime):
+                    return SimpleNamespace(run_one_shot_turn=lambda _session, _message: turn(runtime))
+
+                with (
+                    patch("rightmemory.config.load_config", side_effect=lambda role, memory_root: RuntimeConfig(
+                        role=role, model_id="fixture", memory_root=memory_root, runtime_mode=mode,
+                    )),
+                    patch.object(RightMemoryRuntime, "_build_agent", build_standalone),
+                    patch.object(RightMemoryRuntime, "_build_cli_agent", build_cli),
+                    ThreadPoolExecutor(max_workers=3) as pool,
+                ):
+                    self.assertEqual(self.service.run_child(task_id, "skills")["status"], "completed")
+                    memory = pool.submit(self.service.run_child, task_id, "memory")
+                    advice = pool.submit(self.service.run_child, task_id, "guidance")
+                    try:
+                        self.assertTrue(entered["update"].wait(10), "memory turn did not start")
+                        self.assertTrue(entered["guidance-curator"].wait(10), "guidance turn did not overlap memory")
+                        children = self.service.status(task_id)["children"]
+                        self.assertEqual({domain: child["status"] for domain, child in children.items()}, {
+                            "memory": "running", "guidance": "running", "skills": "completed",
+                        })
+                        duplicate = pool.submit(self.service.run_child, task_id, "memory")
+                        with self.assertRaisesRegex(RuntimeError, "domain worker is still running"):
+                            duplicate.result(timeout=10)
+                        self.assertEqual(self.service.status(task_id)["children"], children)
+                        with self.assertRaisesRegex(RuntimeError, "completed domain work"):
+                            self.service.complete(task_id)
+                    finally:
+                        release.set()
+                    for child, future in (("memory", memory), ("guidance", advice)):
+                        returned = future.result(timeout=10)
+                        self.assertEqual(returned["status"], "completed")
+                        self.assertEqual(returned["attempt"], children[child]["attempt"])
+                        self.assertEqual(Path(returned["worktree"]), worktree)
+
+                self._git("add", "--", "MEMORY.md", guidance, cwd=worktree)
+                self._git("commit", "-m", "review parallel contributions", cwd=worktree)
+                self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self.assertEqual((self.root / "MEMORY.md").read_text(encoding="utf-8"), initial_memory)
+                self.assertFalse((self.root / guidance).exists())
+                receipts = [self.root / f"learning/processed/{domain}/{candidate_id}.json"
+                            for domain in LEARNING_DOMAINS]
+                self.assertFalse(any(receipt.exists() for receipt in receipts))
+                self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root)], [candidate_id])
+
+                result = self.service.complete(task_id)
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(set(result["changed_paths"]), {"MEMORY.md", guidance})
+                self.assertEqual((self.root / "MEMORY.md").read_text(encoding="utf-8"), initial_memory + addition)
+                self.assertTrue((self.root / guidance).is_file())
+                self.assertTrue(all(receipt.is_file() for receipt in receipts))
+                self.assertFalse(list_learning_candidates(self.root))
+
+    def test_parent_rejects_configured_child_edit_outside_requested_domain(self):
+        candidate_id = self._submit()
+        task = self.service.begin("guidance", mode="maintain")
+        worktree = Path(task["worktree"])
         head = self._git("rev-parse", "HEAD")
 
         def turn(config, _mode, _task_id):
@@ -772,13 +885,14 @@ class LearningServiceTests(IsolatedWriteTestBase):
             return "Done"
 
         with self._configured_executor(turn):
-            with self.assertRaisesRegex(ValueError, "outside its ownership"):
-                self.service.run_child(task["task_id"], "guidance")
-        self.assertEqual(self.service.status(task["task_id"])["children"]["guidance"]["status"], "failed")
-        with self.assertRaisesRegex(RuntimeError, "completed domain work"):
+            self.assertEqual(self.service.run_child(task["task_id"], "guidance")["status"], "completed")
+        self._git("add", "--", "MEMORY.md", cwd=worktree)
+        self._git("commit", "-m", "review foreign domain edit", cwd=worktree)
+        with self.assertRaisesRegex(ValueError, "outside its requested domains"):
             self.service.complete(task["task_id"])
         self.assertEqual(self._git("rev-parse", "HEAD"), head)
-        self.assertEqual(len(list_learning_candidates(self.root)), 1)
+        self.assertNotIn("foreign domain", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root)], [candidate_id])
 
     def test_configured_maintenance_retry_keeps_frozen_mode(self):
         calls = []
