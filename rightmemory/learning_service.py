@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shlex
-import stat
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, replace
@@ -18,7 +17,6 @@ from .config import load_sync_config
 from .curation_batch import select_curation_batch
 from .curation_budget import domain_budget
 from .isolated_write import WorktreeLease
-from .isolated_write import IsolatedWriteSupervisor
 from .git_storage import git
 from .learning import (
     DOMAIN_ROLES, LEARNING_DOMAINS, LearningCandidate, LearningClaim, learning_claims,
@@ -401,7 +399,7 @@ class LearningService:
             child = {
                 "status": "running", "attempt": attempt, "executor": _executor,
                 "head": git(task.worktree, "rev-parse", "HEAD"),
-                "index": git(task.worktree, "write-tree"), "instructions": instructions,
+                "index": _index_signature(task.worktree), "instructions": instructions,
             }
             record["children"][domain] = child
             self._save_task(record)
@@ -449,7 +447,7 @@ class LearningService:
             ):
                 raise RuntimeError("wait for the configured domain worker to return before completing it")
             task = self._writer(record["domain"]).read(task_id)
-            if git(task.worktree, "rev-parse", "HEAD") != child["head"] or git(task.worktree, "write-tree") != child["index"]:
+            if git(task.worktree, "rev-parse", "HEAD") != child["head"] or _index_signature(task.worktree) != child["index"]:
                 child.update(status="failed", error="domain work changed shared Git history or staging")
                 self._save_task(record)
                 raise RuntimeError(child["error"])
@@ -459,13 +457,6 @@ class LearningService:
 
     def run_child(self, task_id: str, domain: str, *, instructions: str = "") -> dict[str, Any]:
         """Run one configured domain model without finalizing its parent's work."""
-        # Serialize configured child executions through their full before/after
-        # scope check, not merely the model turn. Native delegation can use the
-        # host's parallel agents; the parent is responsible for their boundaries.
-        with self._child_execution_locked():
-            return self._run_child(task_id, domain, instructions=instructions)
-
-    def _run_child(self, task_id: str, domain: str, *, instructions: str = "") -> dict[str, Any]:
         from .config import load_config
         from .runtime import RightMemoryRuntime
 
@@ -481,7 +472,6 @@ class LearningService:
             lease.acquire()
         worktree = Path(prepared["worktree"])
         try:
-            before = _workspace_files(worktree)
             config = load_config(DOMAIN_ROLES[domain], memory_root=self.memory_root)
             config = replace(config, memory_root=worktree, state_root=self.memory_root,
                              fresh_provider_session=True, sync=replace(config.sync, enabled=False))
@@ -490,15 +480,6 @@ class LearningService:
                 output = runtime.run_session_turn(f"{task_id}-{domain}-{attempt}", Path(prepared["instructions_file"]).read_text(encoding="utf-8"))
             finally:
                 runtime.cleanup()
-            after = _workspace_files(worktree)
-            owner = IsolatedWriteSupervisor(worktree, DOMAIN_ROLES[domain])
-            changed = [path for path in before.keys() | after.keys() if before.get(path) != after.get(path)]
-            # Configured calls share a worktree, so run them serially through the
-            # runtime write lock. Native parallel workers use the same ownership
-            # instructions; final publication always validates the combined scope.
-            invalid = [path for path in changed if not owner._is_role_write_path(path)]
-            if invalid:
-                raise ValueError("domain worker changed files outside its ownership: " + ", ".join(sorted(invalid)))
             return self.complete_child(task_id, domain, attempt, output, _lease=lease)
         except BaseException as exc:
             with self._locked():
@@ -512,18 +493,6 @@ class LearningService:
 
     def _child_lease(self, record: dict, domain: str) -> WorktreeLease:
         return WorktreeLease(self.memory_root, DOMAIN_ROLES[domain], record["task_id"])
-
-    @contextmanager
-    def _child_execution_locked(self):
-        path = self.root / "child-execution.lock"
-        self._check_path(path)
-        _ensure_durable_directory(path.parent)
-        with path.open("a+b") as handle:
-            lock_file(handle)
-            try:
-                yield
-            finally:
-                unlock_file(handle)
 
     def _child_result(self, record: dict, domain: str) -> dict[str, Any]:
         child = record["children"][domain]
@@ -547,7 +516,8 @@ class LearningService:
             "\nFor configured domain work, use run_curator(domain, instructions), or the CLI commands below. "
             "For native delegation, worker-begin returns the shared worktree and domain instructions. "
             "After that agent returns, record its result with the returned worker-complete command. "
-            "Each selected domain contributes before parent completion.\n"
+            "Run the selected domain agents in parallel on their assigned files, "
+            "then wait for all of them to return before reviewing or editing the combined result.\n"
         )
         for domain in curation_domains(record["domain"]):
             for action in ("worker-begin", "worker-run"):
@@ -904,19 +874,8 @@ def _candidate_input(candidate: LearningCandidate) -> dict[str, Any]:
     }
 
 
-def _workspace_files(root: Path) -> dict[str, str]:
-    paths = git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z").split("\0")
-    result = {}
-    for relative in paths:
-        if not relative:
-            continue
-        path = root / relative
-        if not path.exists() and not path.is_symlink():
-            continue
-        if path.is_symlink() or any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
-            raise ValueError("candidate file must not be a symbolic link: " + relative)
-        mode = path.stat().st_mode
-        if not stat.S_ISREG(mode):
-            raise ValueError("candidate path must be a regular file: " + relative)
-        result[relative] = f"{stat.S_IMODE(mode)}:" + hashlib.sha256(path.read_bytes()).hexdigest()
-    return result
+def _index_signature(worktree: Path) -> str:
+    # Read staged entries without taking Git's index lock. Ordinary status reads
+    # by another worker may refresh index metadata without changing those entries.
+    entries = git(worktree, "ls-files", "--stage", "-z")
+    return hashlib.sha256(entries.encode("utf-8")).hexdigest()

@@ -7,7 +7,8 @@ import tomllib
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from threading import Barrier
+from unittest.mock import call, patch
 
 from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
 from rightmemory.config import (
@@ -858,7 +859,7 @@ class RuntimeTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
 
-    def test_parent_tool_dispatches_child_using_the_active_root(self):
+    def test_parent_tool_dispatches_children_concurrently_using_the_active_root(self):
         from pydantic_ai import Agent
         from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
         from pydantic_ai.models.function import FunctionModel
@@ -874,12 +875,18 @@ class RuntimeTests(unittest.TestCase):
 
         def parent_model(messages, _info):
             if len(messages) == 1:
-                return ModelResponse(parts=[ToolCallPart("run_curator", {"domain": "guidance", "instructions": "Refine tone"})])
+                return ModelResponse(parts=[
+                    ToolCallPart("run_curator", {"domain": "guidance", "instructions": "Refine tone"}),
+                    ToolCallPart("run_curator", {"domain": "skills", "instructions": "Review workflow"}),
+                ])
             return ModelResponse(parts=[TextPart("parent finished")])
 
-        def run_child(*args, **kwargs):
+        ready = Barrier(2, timeout=10)
+
+        def run_child(_task_id, _domain, *, instructions):
+            ready.wait()
             child = Agent(TestModel(custom_output_text="child finished"))
-            return {"status": child.run_sync("fixture").output}
+            return {"status": child.run_sync(instructions).output}
 
         agent = Agent(FunctionModel(parent_model), tools=[tools["run_curator"]])
         with patch("rightmemory.learning_service.LearningService") as service:
@@ -888,17 +895,33 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(result, ("parent finished", None))
         self.assertFalse((config.memory_root / ".runtime" / "memory.lock").exists())
-        service.assert_called_once_with(root)
-        service.return_value.run_child.assert_called_once_with("test-task", "guidance", instructions="Refine tone")
+        self.assertEqual(service.call_args_list, [call(root), call(root)])
+        self.assertCountEqual(service.return_value.run_child.call_args_list, [
+            call("test-task", "guidance", instructions="Refine tone"),
+            call("test-task", "skills", instructions="Review workflow"),
+        ])
 
     def test_child_tools_edit_their_domain_and_leave_commit_to_parent(self):
-        for role in ("update", "guidance-curator", "skills-curator"):
+        paths = {
+            "update": "MEMORY.md",
+            "guidance-curator": "learning/guidance/example.md",
+            "skills-curator": "learning/skills/example/SKILL.md",
+        }
+        for role, allowed in paths.items():
             with self.subTest(role=role), patch.object(RightMemoryRuntime, "_build_agent", return_value=object()):
-                config = RuntimeConfig(role=role, memory_root=Path(self.tempdir.name))
+                root = Path(self.tempdir.name) / role
+                root.mkdir()
+                config = RuntimeConfig(role=role, memory_root=root)
                 runtime = RightMemoryRuntime(config, curation_task_id="test-task")
                 tools = {tool.__name__ for tool in runtime._agent_tools()}
                 self.assertTrue({"edit_file", "git_diff"} <= tools)
                 self.assertFalse({"git_add", "git_commit", "run_curator", "sync_push"} & tools)
+                runtime.tools.create_file(allowed, "# Example\n")
+                self.assertTrue((root / allowed).is_file())
+                for foreign in set(paths.values()) - {allowed}:
+                    with self.assertRaisesRegex(ValueError, "can only write"):
+                        runtime.tools.create_file(foreign, "# Foreign edit\n")
+                    self.assertFalse((root / foreign).exists())
 
     def test_maintenance_parent_recounts_the_selected_domain(self):
         root = Path(self.tempdir.name)
@@ -2392,21 +2415,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result, "no strong match")
         state = runtime.retrieve_context.load("agent-session")
         self.assertNotEqual(state.delivered_memory_commit, "old-commit")
-    def test_write_role_creates_memory_lock_without_synthesizing_root_gitignore(self):
-        config = RuntimeConfig(
-            role="update",
-            model_id="openai/test",
-            memory_root=Path(self.tempdir.name),
-            state_root=Path(self.tempdir.name) / "state",
-        )
-        config.state_root.mkdir()
+    def test_only_task_bound_child_skips_the_memory_write_lock(self):
+        root = Path(self.tempdir.name)
+        for task_id in (None, "test-task"):
+            with self.subTest(task_id=task_id):
+                worktree = root / (task_id or "unbound")
+                worktree.mkdir()
+                state_root = worktree / "state"
+                state_root.mkdir()
+                config = RuntimeConfig(
+                    role="update", model_id="openai/test", memory_root=worktree, state_root=state_root,
+                )
 
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            runtime.run_session_turn("agent-session", "remember one")
+                with patch.dict("sys.modules", self._fake_pydantic_modules()):
+                    runtime = RightMemoryRuntime(config, curation_task_id=task_id)
+                    runtime.run_session_turn("agent-session", "remember one")
 
-        self.assertTrue((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
-        self.assertFalse((Path(self.tempdir.name) / ".gitignore").exists())
+                self.assertEqual((worktree / ".runtime" / "memory.lock").exists(), task_id is None)
+                self.assertFalse((worktree / ".gitignore").exists())
 
 
     def test_update_turn_runs_sync_pull_without_exposing_context(self):

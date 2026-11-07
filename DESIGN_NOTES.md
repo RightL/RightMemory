@@ -89,10 +89,13 @@ publishes against the current claim. Prepared results and durable outcomes let a
 interrupted completion recover without repeating model judgment; unfinished program
 effects retry through completion as well. Explicit task retry replaces abandoned edits
 while fencing their old owner. Domain attempt ids reject stale completions; child
-completion leaves live files and evidence receipts unchanged. Configured domain runs
-serialize their edit checks in the shared worktree. Native domain agents can work in
-parallel on their assigned files, and the parent waits for them before reviewing or
-committing. Publication validates the combined result against the requested scope.
+completion leaves live files and evidence receipts unchanged. In every execution mode,
+domain agents can work in parallel on their assigned files. The parent waits for them,
+reviews the combined result, and makes any needed corrections before committing.
+Standalone edit tools enforce domain file boundaries. CLI-agent and host-provided
+subagents use their own file tools, with assigned ownership and parent review.
+A whole-worktree comparison cannot attribute edits to one worker while others are
+editing, so publication validates the combined result against the requested scope.
 
 Native Retrieve prepares access to real source files and a compact learning index,
 then returns an attributed handoff with native file tools. This shares storage and
