@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ from .automatic_effects import (
     forget_memory_change_pressure_operation,
     memory_change_pressure_points,
 )
-from .config import CURATOR_ROLES, PrunerConfig, RuntimeConfig, load_config
+from .config import CURATION_PARENT_ROLE, CURATOR_ROLES, PrunerConfig, RuntimeConfig, load_config
 from .debug import DebugTrace
 from .isolated_write import IsolatedWriteResult, IsolatedWriteSupervisor, MainMemoryDirtyError
 from .learning import DOMAIN_ROLES
@@ -146,12 +147,14 @@ class RightMemoryRuntime:
         codex_runner: CodexSdkRunner | None = None,
         curation_config_root: Path | None = None,
         curation_mode: str | None = None,
+        curation_task_id: str | None = None,
     ):
         if config.runtime_mode not in {"standalone", "cli-agent"}:
             raise RuntimeError(f"unsupported runtime mode: {config.runtime_mode}")
         self.config = config
         self._curation_config_root = curation_config_root or config.state_root
         self._curation_mode = curation_mode
+        self._curation_task_id = curation_task_id
         if config.retrieve_backend not in {"agent", "embedding"}:
             raise ValueError(f"unsupported retrieval backend: {config.retrieve_backend}")
         if config.retrieve_filter is not None and config.retrieve_backend != "embedding":
@@ -1489,7 +1492,13 @@ class RightMemoryRuntime:
         self._run_sync_reconciler(result)
 
     def _memory_write_lock(self):
-        if self.config.role in {"historian", "retrieve"}:
+        # Curation leases protect the parent and each domain attempt. Distinct
+        # domains can edit their assigned files in the shared candidate concurrently.
+        curation_owns_lease = (
+            self.config.role in {CURATION_PARENT_ROLE, *DOMAIN_ROLES.values()}
+            and self._curation_task_id is not None
+        )
+        if curation_owns_lease or self.config.role in {"historian", "retrieve"}:
             return nullcontext()
         return MemoryWriteLock(self.config.memory_root)
 
@@ -1760,7 +1769,9 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.read_command),
             self._agent_tool(self.tools.outline_file),
         ]
-        if self.config.role in DOMAIN_ROLES.values():
+        domain_curator = self.config.role in DOMAIN_ROLES.values()
+        curation_parent = self.config.role == CURATION_PARENT_ROLE
+        if domain_curator or curation_parent:
             read_tools.extend([
                 self._agent_tool(self.tools.read_learning),
                 self._agent_tool(self.tools.search_learning),
@@ -1786,9 +1797,22 @@ class RightMemoryRuntime:
             self._agent_tool(self.tools.rename_file),
             self._agent_tool(self.tools.git_status),
             self._agent_tool(self.tools.git_diff),
-            self._agent_tool(self.tools.git_add),
-            self._agent_tool(self.tools.git_commit),
         ]
+        if not domain_curator or self._curation_task_id is None:
+            write_tools.extend([
+                self._agent_tool(self.tools.git_add),
+                self._agent_tool(self.tools.git_commit),
+            ])
+        if curation_parent and self._curation_task_id is not None:
+            dispatch = self._agent_tool(self.run_curator)
+
+            @wraps(dispatch)
+            async def run_curator_tool(domain: str, instructions: str = "") -> dict[str, Any]:
+                # A child can run its own standalone model, which Pydantic AI
+                # forbids from synchronous tool callbacks.
+                return await asyncio.to_thread(dispatch, domain, instructions)
+
+            write_tools.append(run_curator_tool)
         if self.config.role == "sync-reconciler":
             write_tools.append(self._agent_tool(self.tools.git_discard))
         if self.config.role == "shared-view-builder":
@@ -1803,13 +1827,24 @@ class RightMemoryRuntime:
             write_tools.append(self._agent_tool(self.sync_push))
         return write_tools
 
-    def count_curation_tokens(self) -> dict[str, Any]:
-        """Measure this curator's edited retained text against its independent limit."""
+    def run_curator(self, domain: str, instructions: str = "") -> dict[str, Any]:
+        """Run the requested domain curator on this task's shared worktree."""
+        if self.config.role != CURATION_PARENT_ROLE or self._curation_task_id is None:
+            raise ValueError("running a domain curator requires an active parent curation task")
+        from .learning_service import LearningService
+
+        return LearningService(self.config.state_root).run_child(
+            self._curation_task_id, domain, instructions=instructions,
+        )
+
+    def count_curation_tokens(self, domain: str | None = None) -> dict[str, Any]:
+        """Measure edited retained text against a domain's limit. The parent supplies the domain."""
         from .curation_budget import domain_budget
 
-        domain = next((key for key, role in DOMAIN_ROLES.items() if role == self.config.role), None)
-        if domain is None:
-            raise ValueError("retained-text counting requires a curation role")
+        role_domain = next((key for key, role in DOMAIN_ROLES.items() if role == self.config.role), None)
+        domain = role_domain if domain is None else domain
+        if domain not in DOMAIN_ROLES or (self.config.role != CURATION_PARENT_ROLE and domain != role_domain):
+            raise ValueError("choose a curation domain this role can recount: memory, guidance, or skills")
         return domain_budget(
             self.config.memory_root, domain, state_root=self._curation_config_root,
         )

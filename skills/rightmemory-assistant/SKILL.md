@@ -5,7 +5,7 @@ description: "Use when the user chooses RightMemory assistant execution: retriev
 
 # Use RightMemory with Native Agents
 
-The installed memory root is `{{MEMORY_ROOT}}`. Use that root and one stable session id throughout the conversation. Use its absolute path as `<active-root>` in control commands. The main agent owns submissions and curation delegation. Retrieve and the three domain curators run as native agents with access to the supplied directories; RightMemory manages evidence, isolation, validation, and publication.
+The installed memory root is `{{MEMORY_ROOT}}`. Use that root and one stable session id throughout the conversation. Use its absolute path as `<active-root>` in control commands. The main agent owns submissions and delegates ready curation to a parent. Retrieve, the curation parent, and its domain agents run as native agents with access to the supplied directories; RightMemory manages evidence, isolation, validation, and publication.
 
 Use the commands below or their matching assistant MCP tools. Keep this skill active with either transport.
 
@@ -37,23 +37,21 @@ Combine related evidence ready at a natural boundary and capture each occurrence
 
 Reuse the same request id and evidence when retrying a submission. A saved candidate confirms capture, not adoption as formal memory, guidance, or a skill.
 
-## Reconcile Ready Domains
+## Reconcile Ready Evidence
 
-Handle ready notices and interrupted or uncertain active tasks returned by normal RightMemory calls. A subagent passes these notices to the main agent with its result. For a new ready domain, the main agent prepares its task without starting a model client:
+Handle ready notices and interrupted active tasks returned by normal RightMemory calls. A subagent passes these notices to the main agent. Prepare a ready update batch without starting a configured model client:
 
 ```bash
-rightmemory curate --root <active-root> begin --domain <memory|guidance|skills> --mode update
+rightmemory curate --root <active-root> begin --mode update
 ```
 
-When a notice reports `effects_pending`, use its `complete_argv` to retry program finalization; the semantic work has already landed and needs no new curator.
+Delegate the returned `instructions_file`, `candidates_file`, and shared `worktree` to one native parent. It prepares domain contributions with `worker-begin`, delegates their instructions to native agents, and records their returned results with `worker-complete`. Domain agents edit their assigned files; the parent reviews the combined changes, owns Git staging and commits, and uses the supplied completion command. All controls remain bound to the supplied active root.
 
-Delegate a newly claimed task with its `instructions_file`, `candidates_file`, and isolated `worktree` to one native curator. It follows the shared domain core, edits allowed files, validates and commits the result, then uses the supplied completion command. Keep the supplied active-root binding when calling control commands from the worktree.
+An active task is existing work. After interruption, inspect its status and confirm prior workers ended before resuming or replacing them. `effects_pending` means semantic work has landed; retry its supplied completion command without starting new learning. Use the returned `retry_argv` when a task must be reconsidered from a new base, preserving unpublished work for inspection.
 
-An active task is existing work. Do not dispatch another worker while its worker is running. After interruption, inspect its status, confirm the prior worker ended, and prefer resuming the same task and worktree through the returned controls. An active native task can report `ready: false`; do not overlook it merely because it is not a new batch. If its edits must be abandoned or its base is stale, use the returned `retry_argv`.
+Continue the user's task while curation runs. Each parent update processes one bounded evidence batch across the three domains; returned ready notices identify remaining batches. Publication records their judgments together and removes fully processed raw evidence. A domain may contribute no changes.
 
-Continue the user's task while curation runs. Each domain processes bounded update batches; use returned ready notices to continue remaining evidence. The program removes a raw candidate after all three domains finish. Curators preserve useful context, cases, or experiences in their own sources before completion.
-
-Requested broader maintenance uses the corresponding domain maintenance skill. It starts from scoped existing material and uses the same preparation and completion flow.
+Requested maintenance uses `maintain-rightmemory-system` across domains, or the corresponding domain maintenance skill for a focused scope. All use the same parent review and publication flow.
 
 ## Report the Actual Outcome
 

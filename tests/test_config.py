@@ -7,14 +7,17 @@ import tomllib
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from threading import Barrier
+from unittest.mock import call, patch
 
 from rightmemory.agent_cli import NO_SESSION_RIGHTMEMORY_SESSION_ID
 from rightmemory.config import (
     AgentCliConfig,
+    CURATION_PARENT_ROLE,
     CurationBatchConfig,
     CurationTokenLimits,
     PrunerConfig,
+    ROLES,
     RUNTIME_ROLES,
     RuntimeConfig,
     load_config,
@@ -545,6 +548,27 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.model_id, "openai/update")
 
+    def test_curation_parent_role_inherits_update_executor_and_accepts_an_override(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            config_path = root / "rightmemory.toml"
+            update = '[update.agent_cli]\nprovider="codex"\nmodel="writer"\nreasoning_effort="high"\n'
+            config_path.write_text(update, encoding="utf-8")
+
+            config = load_config(CURATION_PARENT_ROLE, memory_root=root)
+
+            self.assertNotIn(config.role, ROLES)
+            self.assertEqual(config.role, CURATION_PARENT_ROLE)
+            self.assertEqual(config.agent_cli, load_config("update", memory_root=root).agent_cli)
+            config_path.write_text(
+                update + '\n[curation-parent.model]\nmodel_id="openai/parent"\n', encoding="utf-8",
+            )
+
+            config = load_config(CURATION_PARENT_ROLE, memory_root=root)
+
+            self.assertEqual(config.runtime_mode, "standalone")
+            self.assertEqual(config.model_id, "openai/parent")
+
     @patch("rightmemory.config.MEMORY_ROOT", Path("/home/example/.rightmemory"))
     def test_debug_trace_config(self):
         config_path = self._write_config(
@@ -835,6 +859,113 @@ class RuntimeTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
 
+    def test_parent_tool_dispatches_children_concurrently_using_the_active_root(self):
+        from pydantic_ai import Agent
+        from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+        from pydantic_ai.models.function import FunctionModel
+        from pydantic_ai.models.test import TestModel
+
+        root = Path(self.tempdir.name)
+        config = RuntimeConfig(role=CURATION_PARENT_ROLE, memory_root=root / "worktree", state_root=root)
+        with patch.object(RightMemoryRuntime, "_build_agent", return_value=object()):
+            runtime = RightMemoryRuntime(config, curation_task_id="test-task")
+        tools = {tool.__name__: tool for tool in runtime._agent_tools()}
+        self.assertTrue({"git_add", "git_commit", "git_diff", "git_status", "read_learning"} <= tools.keys())
+        self.assertNotIn("sync_push", tools)
+
+        def parent_model(messages, _info):
+            if len(messages) == 1:
+                return ModelResponse(parts=[
+                    ToolCallPart("run_curator", {"domain": "guidance", "instructions": "Refine tone"}),
+                    ToolCallPart("run_curator", {"domain": "skills", "instructions": "Review workflow"}),
+                ])
+            return ModelResponse(parts=[TextPart("parent finished")])
+
+        ready = Barrier(2, timeout=10)
+
+        def run_child(_task_id, _domain, *, instructions):
+            ready.wait()
+            child = Agent(TestModel(custom_output_text="child finished"))
+            return {"status": child.run_sync(instructions).output}
+
+        agent = Agent(FunctionModel(parent_model), tools=[tools["run_curator"]])
+        with patch("rightmemory.learning_service.LearningService") as service:
+            service.return_value.run_child.side_effect = run_child
+            result = runtime._run_locked_turn(lambda: agent.run_sync("fixture").output)
+
+        self.assertEqual(result, ("parent finished", None))
+        self.assertFalse((config.memory_root / ".runtime" / "memory.lock").exists())
+        self.assertEqual(service.call_args_list, [call(root), call(root)])
+        self.assertCountEqual(service.return_value.run_child.call_args_list, [
+            call("test-task", "guidance", instructions="Refine tone"),
+            call("test-task", "skills", instructions="Review workflow"),
+        ])
+
+    def test_child_tools_edit_their_domain_and_leave_commit_to_parent(self):
+        paths = {
+            "update": "MEMORY.md",
+            "guidance-curator": "learning/guidance/example.md",
+            "skills-curator": "learning/skills/example/SKILL.md",
+        }
+        for role, allowed in paths.items():
+            with self.subTest(role=role), patch.object(RightMemoryRuntime, "_build_agent", return_value=object()):
+                root = Path(self.tempdir.name) / role
+                root.mkdir()
+                config = RuntimeConfig(role=role, memory_root=root)
+                runtime = RightMemoryRuntime(config, curation_task_id="test-task")
+                tools = {tool.__name__ for tool in runtime._agent_tools()}
+                self.assertTrue({"edit_file", "git_diff"} <= tools)
+                self.assertFalse({"git_add", "git_commit", "run_curator", "sync_push"} & tools)
+                runtime.tools.create_file(allowed, "# Example\n")
+                self.assertTrue((root / allowed).is_file())
+                for foreign in set(paths.values()) - {allowed}:
+                    with self.assertRaisesRegex(ValueError, "can only write"):
+                        runtime.tools.create_file(foreign, "# Foreign edit\n")
+                    self.assertFalse((root / foreign).exists())
+
+    def test_maintenance_parent_recounts_the_selected_domain(self):
+        root = Path(self.tempdir.name)
+        config = RuntimeConfig(role=CURATION_PARENT_ROLE, memory_root=root / "worktree", state_root=root)
+        with patch.object(RightMemoryRuntime, "_build_agent", return_value=object()):
+            runtime = RightMemoryRuntime(config, curation_mode="maintain", curation_task_id="test-task")
+        tools = {tool.__name__: tool for tool in runtime._agent_tools()}
+
+        with patch("rightmemory.curation_budget.domain_budget", return_value={"domain": "skills"}) as budget:
+            self.assertEqual(tools["count_curation_tokens"]("skills"), {"domain": "skills"})
+        budget.assert_called_once_with(config.memory_root, "skills", state_root=root)
+        with self.assertRaisesRegex(ValueError, "choose a curation domain"):
+            runtime.count_curation_tokens("all")
+
+    def test_parent_tools_write_curated_content_and_read_pursuit(self):
+        root = Path(self.tempdir.name)
+        config = RuntimeConfig(role=CURATION_PARENT_ROLE, memory_root=root)
+        with patch.object(RightMemoryRuntime, "_build_agent", return_value=object()):
+            runtime = RightMemoryRuntime(config, curation_task_id="test-task")
+
+        for path in (
+            "MEMORY.md",
+            "MEMORY_agent-corrections-writing.md",
+            "MEMORY_SKILL_example.md",
+            "learning/guidance/example.md",
+            "learning/experiences/example.md",
+            "learning/skills/example/SKILL.md",
+        ):
+            with self.subTest(path=path):
+                runtime.tools.create_file(path, "curated material\n")
+                self.assertTrue((root / path).is_file())
+
+        (root / "PURSUITS.md").write_text("Active pursuits\n", encoding="utf-8")
+        self.assertIn("Active pursuits", runtime.tools.read("PURSUITS.md"))
+        candidate_id = "a" * 64
+        for path in (
+            "PURSUITS.md", "PURSUIT_example.md", "corrections.md",
+            f"learning/candidates/{candidate_id}.json",
+            f"learning/processed/memory/{candidate_id}.json",
+            "learning/claims/memory.json",
+        ):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "can only write"):
+                runtime.tools.create_file(path)
+
     def test_runtime_config_replace_preserves_explicit_state_root_when_memory_root_changes(self):
         config = RuntimeConfig(role="retrieve", model_id="openai/test")
         isolated_memory_root = Path("/isolated/rightmemory")
@@ -936,7 +1067,7 @@ class RuntimeTests(unittest.TestCase):
                     tool_names = {tool.__name__ for tool in runtime.agent.tools}
                     self.assertEqual(
                         "count_curation_tokens" in tool_names,
-                        role in {"update", "guidance-curator", "skills-curator"},
+                        role in {"update", "guidance-curator", "skills-curator", CURATION_PARENT_ROLE},
                     )
 
     def test_standalone_updates_do_not_count_retained_text_or_expose_count_tool(self):
@@ -949,7 +1080,7 @@ class RuntimeTests(unittest.TestCase):
                 side_effect=AssertionError("unexpected token count"),
             ),
         ):
-            for role in ("update", "guidance-curator", "skills-curator"):
+            for role in ("update", "guidance-curator", "skills-curator", CURATION_PARENT_ROLE):
                 for mode in (None, "update"):
                     with self.subTest(role=role, mode=mode):
                         config = RuntimeConfig(role=role, model_id="openai/test", memory_root=root)
@@ -2284,21 +2415,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result, "no strong match")
         state = runtime.retrieve_context.load("agent-session")
         self.assertNotEqual(state.delivered_memory_commit, "old-commit")
-    def test_write_role_creates_memory_lock_without_synthesizing_root_gitignore(self):
-        config = RuntimeConfig(
-            role="update",
-            model_id="openai/test",
-            memory_root=Path(self.tempdir.name),
-            state_root=Path(self.tempdir.name) / "state",
-        )
-        config.state_root.mkdir()
+    def test_only_task_bound_child_skips_the_memory_write_lock(self):
+        root = Path(self.tempdir.name)
+        for task_id in (None, "test-task"):
+            with self.subTest(task_id=task_id):
+                worktree = root / (task_id or "unbound")
+                worktree.mkdir()
+                state_root = worktree / "state"
+                state_root.mkdir()
+                config = RuntimeConfig(
+                    role="update", model_id="openai/test", memory_root=worktree, state_root=state_root,
+                )
 
-        with patch.dict("sys.modules", self._fake_pydantic_modules()):
-            runtime = RightMemoryRuntime(config)
-            runtime.run_session_turn("agent-session", "remember one")
+                with patch.dict("sys.modules", self._fake_pydantic_modules()):
+                    runtime = RightMemoryRuntime(config, curation_task_id=task_id)
+                    runtime.run_session_turn("agent-session", "remember one")
 
-        self.assertTrue((Path(self.tempdir.name) / ".runtime" / "memory.lock").exists())
-        self.assertFalse((Path(self.tempdir.name) / ".gitignore").exists())
+                self.assertEqual((worktree / ".runtime" / "memory.lock").exists(), task_id is None)
+                self.assertFalse((worktree / ".gitignore").exists())
 
 
     def test_update_turn_runs_sync_pull_without_exposing_context(self):

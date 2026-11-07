@@ -917,12 +917,21 @@ class SyncManager:
                     for revision in (merge_base, start_commit, upstream_commit)
                 ]
                 versions = [text for text in stages if text is not None]
-                merged = merge_learning_evidence(relative, *versions)
                 path = root / relative
                 if path.is_symlink() or any(parent.is_symlink() for parent in path.parents if parent != root):
                     raise ValueError("learning evidence must not traverse symbolic links")
                 if path.exists() and not path.is_file():
                     raise ValueError("learning evidence must be a regular file")
+                if not versions:
+                    # Directory-rename inference can move a concurrent capture
+                    # to a receipt path absent from every input tree. Rebuild
+                    # its real identity from the source paths collected above.
+                    path.unlink(missing_ok=True)
+                    removed = self._run_git(root, "update-index", "--force-remove", "--", relative)
+                    if removed.returncode != 0:
+                        raise RuntimeError("could not remove inferred learning rename")
+                    continue
+                merged = merge_learning_evidence(relative, *versions)
                 deleted = stages[0] is not None and (stages[1] is None or stages[2] is None)
                 if deleted:
                     if not relative.startswith("learning/candidates/"):

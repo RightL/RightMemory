@@ -78,6 +78,8 @@ class AssistantMcpTests(unittest.TestCase):
                 "rightmemory_withdraw_candidate",
                 "rightmemory_begin_curation",
                 "rightmemory_complete_curation",
+                "rightmemory_begin_curation_worker",
+                "rightmemory_complete_curation_worker",
                 "rightmemory_curation_status",
                 "rightmemory_count_curation_tokens",
             },
@@ -165,7 +167,7 @@ class AssistantMcpStdioTests(IsolatedWriteTestBase):
                     initialized = await client.initialize()
                     self.assertEqual(initialized.server_info.name, "RightMemory Assistant")
                     listed = await client.list_tools()
-                    self.assertEqual(len(listed.tools), 10)
+                    self.assertEqual(len(listed.tools), 12)
 
                     counted = await client.call_tool("rightmemory_count_curation_tokens", {"domain": "memory"})
                     self.assertFalse(counted.is_error)
@@ -190,7 +192,9 @@ class AssistantMcpStdioTests(IsolatedWriteTestBase):
                     self.assertFalse(first.is_error)
                     self.assertTrue(first.structured_content["saved"])
                     self.assertTrue(first.structured_content["created"])
-                    self.assertTrue(all(item["ready"] for item in first.structured_content["curation"]))
+                    notice, = first.structured_content["curation"]
+                    self.assertEqual(notice["domain"], "all")
+                    self.assertTrue(notice["ready"])
 
                     repeated = await client.call_tool("rightmemory_submit", arguments)
                     self.assertFalse(repeated.is_error)
@@ -212,6 +216,14 @@ class AssistantMcpStdioTests(IsolatedWriteTestBase):
                     validated = await client.call_tool("rightmemory_assistant_validate", {})
                     self.assertFalse(validated.is_error)
                     self.assertTrue(validated.structured_content["ok"])
+
+                    begun = await client.call_tool("rightmemory_begin_curation", {})
+                    self.assertFalse(begun.is_error)
+                    task = begun.structured_content
+                    self.assertEqual(task["status"], "prepared")
+                    self.assertEqual(task["domain"], "all")
+                    self.assertEqual(task["selected_candidate_count"], 1)
+                    self.assertEqual(set(task["children"]), {"memory", "guidance", "skills"})
 
         asyncio.run(exercise())
         self.assertNotEqual(self._git("rev-parse", "HEAD"), self.initial_head)

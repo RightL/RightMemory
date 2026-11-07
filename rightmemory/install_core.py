@@ -438,6 +438,7 @@ class Installer:
         for target in self.skills_targets:
             target.mkdir(parents=True, exist_ok=True)
             for skill_name in (
+                "maintain-rightmemory-system",
                 "maintain-rightmemory",
                 "maintain-agent-guidance",
                 "maintain-work-skills",
