@@ -11,8 +11,10 @@ from mcp.types import CallToolResult, TextContent
 
 class CurationBackend(Protocol):
     def submit(self, session_id: str, evidence: str, request_id: str | None = None, *, executor: str = "native") -> dict[str, Any]: ...
-    def begin(self, domain: str, *, mode: str = "update", scope: str = "", retry_task: str | None = None) -> dict[str, Any]: ...
+    def begin(self, domain: str = "all", *, mode: str = "update", scope: str = "", retry_task: str | None = None) -> dict[str, Any]: ...
     def complete(self, task_id: str, output: str = "") -> dict[str, Any]: ...
+    def begin_child(self, task_id: str, domain: str, *, instructions: str = "", retry: bool = False) -> dict[str, Any]: ...
+    def complete_child(self, task_id: str, domain: str, attempt: str, *, output: str = "") -> dict[str, Any]: ...
     def status(self, task_id: str | None = None) -> dict[str, Any]: ...
     def count(self, domain: str, task_id: str | None = None) -> dict[str, Any]: ...
     def withdraw(self, candidate_id: str) -> dict[str, Any]: ...
@@ -34,8 +36,8 @@ out routine progress and copies of project artifacts with no independent future 
 
 Combine related evidence at a natural boundary. Reuse request_id and identical evidence
 when retrying the same submission; distinct later occurrences receive new request IDs.
-Pending evidence remains available to retrieval. After the three curators finish, the
-program removes its raw source.
+Pending evidence remains available to retrieval until the program publishes the reviewed
+result and retires the processed candidates.
 Pursuit edits use the separate maintain-pursuit-map workflow."""
 
 
@@ -57,15 +59,23 @@ def register_curation_tools(
     def submit(session_id: str, evidence: str, request_id: str | None = None) -> CallToolResult:
         return _invoke(lambda: selected().submit(session_id, evidence, request_id, executor="native"))
 
-    @server.tool(name="rightmemory_begin_curation", description="Prepare an isolated domain task. Update processes pending evidence; Maintain improves existing state in a selected scope. Retry only after the previous worker has stopped.", structured_output=False)
-    def begin(domain: Literal["memory", "guidance", "skills"], mode: Literal["update", "maintain"] = "update", scope: str = "", retry_task: str | None = None) -> CallToolResult:
+    @server.tool(name="rightmemory_begin_curation", description="Prepare a parent curation task. Update processes pending evidence across all domains. Maintain improves existing state in a selected scope. Retry after the prior task has stopped.", structured_output=False)
+    def begin(domain: Literal["all", "memory", "guidance", "skills"] = "all", mode: Literal["update", "maintain"] = "update", scope: str = "", retry_task: str | None = None) -> CallToolResult:
         return _invoke(lambda: selected().begin(domain, mode=mode, scope=scope, retry_task=retry_task))
 
     @server.tool(name="rightmemory_complete_curation", description="Validate and publish a prepared task; the program records domain completion and retires fully processed candidates. Retry the same task after interruption. " + ready_guidance, structured_output=False)
     def complete(task_id: str, output: str = "") -> CallToolResult:
         return _invoke(lambda: selected().complete(task_id, output))
 
-    @server.tool(name="rightmemory_curation_status", description="Inspect pending candidates, domain readiness, or a task without starting model work. " + ready_guidance, structured_output=False)
+    @server.tool(name="rightmemory_begin_curation_worker", description="Prepare a domain worker in the parent task's worktree. Retry after the previous attempt has stopped.", structured_output=False)
+    def begin_child(task_id: str, domain: Literal["memory", "guidance", "skills"], instructions: str = "", retry: bool = False) -> CallToolResult:
+        return _invoke(lambda: selected().begin_child(task_id, domain, instructions=instructions, retry=retry))
+
+    @server.tool(name="rightmemory_complete_curation_worker", description="Record a domain worker's result for parent review. Use the task ID, domain, and attempt returned by worker preparation.", structured_output=False)
+    def complete_child(task_id: str, domain: Literal["memory", "guidance", "skills"], attempt: str, output: str = "") -> CallToolResult:
+        return _invoke(lambda: selected().complete_child(task_id, domain, attempt, output=output))
+
+    @server.tool(name="rightmemory_curation_status", description="Inspect pending candidates, curation readiness, or a task without starting model work. " + ready_guidance, structured_output=False)
     def status(task_id: str | None = None) -> CallToolResult:
         return _invoke(lambda: selected().status(task_id))
 

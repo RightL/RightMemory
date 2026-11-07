@@ -40,7 +40,7 @@ Choose one stable session id for the conversation and reuse it for every RightMe
 
   Use the root reported by `rightmemory status` when it is not already bound. Reuse the request id and identical content for the same submission retry. All three curators can draw useful conclusions from the same evidence.
 
-- Submission wakes the configured worker. Continue the user's task while it processes ready domains. Inspect `rightmemory curate --root <active-root> status` when recovery is needed. A saved candidate confirms capture; the completion receipt confirms publication. The program removes raw evidence after all three domains finish, with useful context or cases retained by their curators.
+- Submission wakes the configured worker. Continue the user's task while its parent coordinates domain contributions and reviews the combined result. Inspect `rightmemory curate --root <active-root> status` when recovery is needed. A saved candidate confirms capture; the parent completion receipt confirms publication. The program removes processed raw evidence with that publication, preserving useful material in the curated sources.
 
 ## User Redirections
 

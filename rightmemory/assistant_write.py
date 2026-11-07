@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .automatic_effects import memory_operation_effects, prepare_memory_operation_effects
 from .curation_budget import require_domain_budget
+from .learning import DOMAIN_ROLES, curation_domains
 from .isolated_write import (
     IsolatedWriteResult,
     IsolatedWriteSupervisor,
@@ -48,7 +49,7 @@ class AssistantWriteManager:
     """Keep native-edit worktrees until a fenced, validated completion is durable."""
 
     def __init__(self, memory_root: Path, *, role: str = "update"):
-        if role not in {"update", "guidance-curator", "skills-curator"}:
+        if role not in {"update", "guidance-curator", "skills-curator", "curation-parent"}:
             raise ValueError(f"unsupported prepared write role: {role}")
         self.memory_root = Path(memory_root).resolve()
         self.role = role
@@ -140,7 +141,8 @@ class AssistantWriteManager:
                 # The no-change path must also pass complete graph validation.
                 self.supervisor._validate_candidate(worktree, [])
                 if task.input_data.get("mode") == "maintain":
-                    require_domain_budget(worktree, task.input_data["domain"], state_root=self.memory_root)
+                    for domain in curation_domains(task.input_data["domain"]):
+                        require_domain_budget(worktree, domain, state_root=self.memory_root)
                 return task.output or ""
 
             try:
@@ -154,12 +156,16 @@ class AssistantWriteManager:
                     },
                     effects_for_outcome=(
                         lambda paths, commits: memory_operation_effects(self.memory_root, paths, commits)
-                    ) if self.role == "update" else None,
+                    ) if self.role == "update" or (
+                        self.role == "curation-parent" and "memory" in curation_domains(task.input_data["domain"])
+                    ) else None,
                     prepare_effects=(
                         lambda operation_id, worktree: prepare_memory_operation_effects(
                             self.memory_root, operation_id, worktree,
                         )
-                    ) if self.role == "update" else None,
+                    ) if self.role == "update" or (
+                        self.role == "curation-parent" and "memory" in curation_domains(task.input_data["domain"])
+                    ) else None,
                     external_finalizer=finalizer,
                     check_current=check_current,
                 )
@@ -215,6 +221,8 @@ class AssistantWriteManager:
             self.memory_root, "rev-list", "--reverse", f"{task.base_commit}..{source_commit}"
         ).splitlines()
         parent = task.base_commit
+        owners = [IsolatedWriteSupervisor(self.memory_root, DOMAIN_ROLES[domain])
+                  for domain in curation_domains(task.input_data["domain"])] if self.role == "curation-parent" else []
         for commit in commits:
             parents = self.supervisor._git_stdout(
                 self.memory_root, "rev-list", "--parents", "-1", commit
@@ -222,6 +230,11 @@ class AssistantWriteManager:
             if parents != [commit, parent]:
                 raise RuntimeError("assistant worktree must have linear commits from its prepared base")
             self.supervisor._validate_commits(self.memory_root, [commit])
+            if owners and any(
+                not any(owner._is_role_write_path(path) for owner in owners)
+                for path in self.supervisor._commit_paths(self.memory_root, commit)
+            ):
+                raise ValueError("parent result changes files outside its requested domains")
             parent = commit
         return commits
 

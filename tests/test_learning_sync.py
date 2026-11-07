@@ -26,24 +26,25 @@ class LearningSyncTests(SyncTestBase):
             submit_learning(self.device, f"session-{index}", f"evidence-{index}")
         local = LearningCoordinator(SyncConfig(memory_root=self.device, enabled=True), holder_id="a" * 32)
         local.batch_config = CurationBatchConfig(trigger_candidates=2, target_batch_candidates=2)
-        first = local.claim("memory")
+        first = local.claim("all")
         self.assertEqual(len(first.candidates), 2)
         local.finalize(first.claim, None, prepared_start_commit=self._git(self.device, "rev-parse", "HEAD"))
         self._git(self.other, "pull", "--ff-only")
         remote = LearningCoordinator(SyncConfig(memory_root=self.other, enabled=True), holder_id="b" * 32)
-        continuation = remote.claim("memory")
+        continuation = remote.claim("all")
         self.assertEqual(len(continuation.candidates), 1)
         remote.finalize(continuation.claim, None, prepared_start_commit=self._git(self.other, "rev-parse", "HEAD"))
-        self.assertEqual(learning_batch_candidate_ids(self.other, "memory"), ())
+        self.assertEqual(learning_batch_candidate_ids(self.other, "all"), ())
+        self.assertEqual(list_learning_candidates(self.other), ())
 
     def test_conflicting_admissions_fail_closed_without_repair(self):
         first = self._seed_candidate()
         second = submit_learning(self.device, "second", "other evidence").candidate_id
         self._git(self.device, "push", "origin", "HEAD:main")
         self._git(self.other, "pull", "--ff-only")
-        write_learning_batch(self.device, "memory", [first])
+        write_learning_batch(self.device, "all", [first])
         self._commit_learning(self.device)
-        write_learning_batch(self.other, "memory", [second])
+        write_learning_batch(self.other, "all", [second])
         self._commit_learning(self.other)
         self._git(self.other, "push")
         head = self._git(self.device, "rev-parse", "HEAD")
@@ -56,22 +57,22 @@ class LearningSyncTests(SyncTestBase):
 
     def test_sync_retires_restored_spent_admission(self):
         candidate_id = self._seed_candidate()
-        write_learning_batch(self.other, "memory", [candidate_id])
-        admission = (self.other / "learning/batches/memory.json").read_bytes()
-        record_learning_processed(self.other, "memory", [candidate_id])
-        (self.other / "learning/batches/memory.json").write_bytes(admission)
+        batch_path = write_learning_batch(self.other, "all", [candidate_id])
+        admission = batch_path.read_bytes()
+        self._process_all(self.other, candidate_id)
+        batch_path.write_bytes(admission)
         self._commit_learning(self.other)
         self._git(self.other, "push")
         result = self._manager().pull()
         self.assertEqual(result.status, "synced", result.message)
-        self.assertEqual(learning_batch_candidate_ids(self.device, "memory"), ())
+        self.assertEqual(learning_batch_candidate_ids(self.device, "all"), ())
 
     def test_sync_repair_cannot_change_admitted_pool(self):
         candidate_id = self._seed_candidate()
         self._create_remote_local_conflict()
         head = self._git(self.device, "rev-parse", "HEAD")
         def repair(candidate, result, operation_id):
-            write_learning_batch(candidate, "memory", [candidate_id])
+            write_learning_batch(candidate, "all", [candidate_id])
             self._git(candidate, "add", "-f", "learning")
             self._commit_candidate_resolution(candidate)
             return "resolved"
@@ -305,6 +306,28 @@ class LearningSyncTests(SyncTestBase):
         repeated = submit_learning(self.device, "session", "Evidence.", request_id="request")
         self.assertFalse(repeated.created)
         self.assertEqual(repeated.pending_domains, ())
+
+    def test_concurrent_capture_survives_inferred_directory_rename_on_retirement(self):
+        retired_id = self._seed_candidate()
+        self._git(self.device, "config", "merge.renames", "true")
+        self._git(self.device, "config", "merge.directoryRenames", "conflict")
+        later = submit_learning(self.device, "later", "New evidence.")
+        expected = next(
+            item for item in list_learning_candidates(self.device) if item.candidate_id == later.candidate_id
+        )
+        self._process_all(self.other, retired_id)
+        self._commit_learning(self.other)
+        self._git(self.other, "push")
+
+        result = self._manager().pull(repair=lambda *args: self.fail("learning merge invoked repair"))
+
+        self.assertEqual(result.status, "synced", result.message)
+        self.assertFalse(self._candidate_path(self.device, retired_id).exists())
+        self.assertTrue(self._candidate_path(self.device, later.candidate_id).is_file())
+        for domain in LEARNING_DOMAINS:
+            self.assertEqual(list_learning_candidates(self.device, domain=domain), (expected,))
+        self.assertEqual(self._git(self.device, "status", "--short"), "")
+        self._assert_no_sync_candidates()
 
     def test_retirement_conflict_with_equivalent_capture_time_change_keeps_deletion(self):
         candidate_id = self._seed_candidate()

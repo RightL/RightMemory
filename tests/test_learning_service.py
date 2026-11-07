@@ -3,8 +3,11 @@ import hashlib
 import io
 import json
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rightmemory.assistant_write import AssistantStaleVersionError, AssistantWriteManager
@@ -20,6 +23,7 @@ from rightmemory.learning_service import (
     LearningClaimLost,
     LearningService,
 )
+from rightmemory.runtime import RightMemoryRuntime
 from rightmemory.semantic_operation import SemanticOperationStore
 from tests.isolated_write_test_base import IsolatedWriteTestBase
 
@@ -46,7 +50,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
         def identities():
             return {notice["domain"]: notice["batch_id"] for notice in self.service.notices()}
 
-        self.assertEqual(identities(), dict.fromkeys(LEARNING_DOMAINS))
+        self.assertEqual(identities(), {"all": None})
         first = self._submit()
         initial = identities()
         self.assertTrue(all(isinstance(value, str) and value for value in initial.values()))
@@ -55,8 +59,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertEqual(identities(), initial)
         second = self._submit("Another observation", "request-two")
         expanded = identities()
-        for domain in LEARNING_DOMAINS:
-            self.assertNotEqual(expanded[domain], initial[domain])
+        self.assertNotEqual(expanded["all"], initial["all"])
 
         with patch(
             "rightmemory.learning_service.list_learning_candidates",
@@ -70,34 +73,36 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.service.withdraw(second)
         self.assertEqual(identities(), initial)
         self.service.withdraw(first)
-        self.assertEqual(identities(), dict.fromkeys(LEARNING_DOMAINS))
+        self.assertEqual(identities(), {"all": None})
 
     def test_admitted_batch_remainder_stays_ready_and_later_evidence_waits_its_own_deadline(self):
         self._use_default_batch_policy()
         initial_ids = {self._submit(f"Observation {index}", f"request-{index}") for index in range(31)}
-        task = self.service.begin("guidance")
-        first_claim = self.service.coordinator.current_claim("guidance")
+        task = self.service.begin("all")
+        self._finish_children(task)
+        first_claim = self.service.coordinator.current_claim("all")
         self.assertEqual(len(first_claim.candidate_ids), 30)
-        self.assertEqual(set(learning_batch_candidate_ids(self.root, "guidance")), initial_ids)
+        self.assertEqual(set(learning_batch_candidate_ids(self.root, "all")), initial_ids)
         remaining_ids = initial_ids - set(first_claim.candidate_ids)
         later = self._submit("New evidence outside the admitted batch", "later")
         self.service.complete(task["task_id"])
 
         self.service = LearningService(self.root)
-        notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+        notice = next(item for item in self.service.notices() if item["domain"] == "all")
         self.assertTrue(notice["ready"])
         self.assertEqual(notice["candidate_count"], 2)
         self.assertIsNone(notice["next_ready_at"])
-        followup = self.service.begin("guidance")
+        followup = self.service.begin("all")
+        self._finish_children(followup)
         self.assertEqual(followup["selected_candidate_count"], 1)
-        self.assertEqual(set(self.service.coordinator.current_claim("guidance").candidate_ids), remaining_ids)
+        self.assertEqual(set(self.service.coordinator.current_claim("all").candidate_ids), remaining_ids)
         self.service.complete(followup["task_id"])
 
         self.service = LearningService(self.root)
-        notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+        notice = next(item for item in self.service.notices() if item["domain"] == "all")
         self.assertFalse(notice["ready"])
         self.assertEqual(notice["candidate_count"], 1)
-        self.assertEqual(self.service.begin("guidance")["status"], "not_ready")
+        self.assertEqual(self.service.begin("all")["status"], "not_ready")
         pending = list_learning_candidates(self.root, domain="guidance")
         self.assertEqual([candidate.candidate_id for candidate in pending], [later])
         deadline = datetime.fromisoformat(pending[0].submitted_at) + timedelta(hours=25)
@@ -105,11 +110,11 @@ class LearningServiceTests(IsolatedWriteTestBase):
         with patch("rightmemory.curation_batch.datetime") as clock:
             clock.now.return_value = deadline
             clock.fromisoformat.side_effect = datetime.fromisoformat
-            notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+            notice = next(item for item in self.service.notices() if item["domain"] == "all")
             self.assertTrue(notice["ready"])
-            resumed = self.service.begin("guidance")
+            resumed = self.service.begin("all")
         self.assertEqual(resumed["selected_candidate_count"], 1)
-        self.assertEqual(self.service.coordinator.current_claim("guidance").candidate_ids, (later,))
+        self.assertEqual(self.service.coordinator.current_claim("all").candidate_ids, (later,))
 
     def test_default_small_backlog_waits_without_claim_worktree_or_model(self):
         self._use_default_batch_policy()
@@ -123,9 +128,8 @@ class LearningServiceTests(IsolatedWriteTestBase):
             patch("rightmemory.config.load_config", side_effect=AssertionError("model config loaded")),
         ):
             notices = self.service.notices()
-            for domain in LEARNING_DOMAINS:
-                self.assertEqual(self.service.begin(domain)["status"], "not_ready")
-                self.assertEqual(self.service.run(domain)["status"], "not_ready")
+            self.assertEqual(self.service.begin()["status"], "not_ready")
+            self.assertEqual(self.service.run()["status"], "not_ready")
         for notice in notices:
             self.assertFalse(notice["ready"])
             self.assertEqual(notice["status"], "waiting")
@@ -135,24 +139,25 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertEqual(self._git("rev-parse", "HEAD"), head)
         self.assertFalse(list((self.root / ".runtime/worktrees").glob("*")))
 
-    def test_default_count_trigger_is_immediate_and_domains_wait_independently(self):
+    def test_default_count_trigger_starts_one_batch_for_all_domains(self):
         self._use_default_batch_policy()
         for index in range(15):
             self._submit(f"Observation {index}", f"request-{index}")
-        for notice in self.service.notices():
-            self.assertTrue(notice["ready"])
-            self.assertIsNone(notice["next_ready_at"])
-        task = self.service.begin("guidance")
+        notice, = self.service.notices()
+        self.assertEqual(notice["domain"], "all")
+        self.assertTrue(notice["ready"])
+        self.assertIsNone(notice["next_ready_at"])
+        task = self.service.begin()
         self.assertEqual(task["selected_candidate_count"], 15)
+        self._finish_children(task)
         self.service.complete(task["task_id"])
         self._submit("A later observation", "later")
-        notices = {notice["domain"]: notice for notice in self.service.notices()}
-        self.assertFalse(notices["guidance"]["ready"])
-        self.assertEqual(notices["guidance"]["candidate_count"], 1)
-        for domain in ("memory", "skills"):
-            self.assertTrue(notices[domain]["ready"])
-            self.assertEqual(notices[domain]["candidate_count"], 16)
-        self.assertEqual(self.service.begin("guidance")["status"], "not_ready")
+        notice, = self.service.notices()
+        self.assertFalse(notice["ready"])
+        self.assertEqual(notice["candidate_count"], 1)
+        for domain in LEARNING_DOMAINS:
+            self.assertEqual(len(list_learning_candidates(self.root, domain=domain)), 1)
+        self.assertEqual(self.service.begin()["status"], "not_ready")
 
     def test_default_elapsed_wait_allows_a_single_candidate(self):
         self._use_default_batch_policy()
@@ -164,28 +169,30 @@ class LearningServiceTests(IsolatedWriteTestBase):
             notice = self.service.notices()[0]
             self.assertTrue(notice["ready"])
             self.assertIsNone(notice["next_ready_at"])
-            task = self.service.begin("memory")
+            task = self.service.begin("all")
         self.assertEqual(task["selected_candidate_count"], 1)
 
     def test_existing_task_can_resume_and_retry_after_default_threshold_is_restored(self):
         self._submit()
-        task = self.service.begin("guidance")
+        task = self.service.begin("all")
         self._use_default_batch_policy()
-        resumed = self.service.begin("guidance")
+        resumed = self.service.begin("all")
         self.assertEqual(resumed["task_id"], task["task_id"])
         self.assertFalse(resumed["claimed"])
-        replacement = self.service.begin("guidance", retry_task=task["task_id"])
+        replacement = self.service.begin("all", retry_task=task["task_id"])
         self.assertTrue(replacement["claimed"])
         self.assertEqual(replacement["selected_candidate_count"], 1)
+        self._finish_children(replacement)
         self.assertEqual(self.service.complete(replacement["task_id"])["status"], "completed")
 
     def test_default_maintenance_can_start_below_update_threshold(self):
         self._use_default_batch_policy()
         self._submit()
         task = self.service.begin("guidance", mode="maintain")
+        self._finish_children(task)
         self.assertEqual(task["selected_candidate_count"], 0)
         completed = self.service.complete(task["task_id"])
-        notice = next(notice for notice in completed["curation"] if notice["domain"] == "guidance")
+        notice = next(notice for notice in completed["curation"] if notice["domain"] == "all")
         self.assertFalse(notice["ready"])
         self.assertEqual(notice["candidate_count"], 1)
 
@@ -200,6 +207,35 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self._git("add", "-f", "--", relative, cwd=worktree)
         self._git("commit", "-m", "curate evidence", cwd=worktree)
 
+    def _finish_children(self, task):
+        completed = []
+        for domain in task["children"]:
+            child = self.service.begin_child(task["task_id"], domain)
+            completed.append(self.service.complete_child(task["task_id"], domain, child["attempt"], "No change"))
+        return completed
+
+    @contextlib.contextmanager
+    def _configured_executor(self, turn):
+        class Executor:
+            def __init__(self, config, *, curation_mode, curation_task_id):
+                self.config = config
+                self.mode = curation_mode
+                self.task_id = curation_task_id
+
+            def run_session_turn(self, _session, _message):
+                return turn(self.config, self.mode, self.task_id)
+
+            def cleanup(self):
+                pass
+
+        with (
+            patch("rightmemory.config.load_config", side_effect=lambda role, memory_root: RuntimeConfig(
+                role=role, model_id="fake", memory_root=memory_root, sync=load_sync_config(memory_root),
+            )),
+            patch("rightmemory.runtime.RightMemoryRuntime", Executor),
+        ):
+            yield
+
     def test_native_begin_is_model_free_and_reuses_a_durable_task(self):
         candidate_id = self._submit()
         with (self.root / "rightmemory.toml").open("a", encoding="utf-8") as handle:
@@ -208,16 +244,15 @@ class LearningServiceTests(IsolatedWriteTestBase):
             patch("rightmemory.config.load_config", side_effect=AssertionError("model config loaded")),
             patch("rightmemory.learning_service.domain_budget", side_effect=AssertionError("counted update")),
         ):
-            task = self.service.begin("guidance")
-            again = LearningService(self.root).begin("guidance")
+            task = self.service.begin("all")
+            again = LearningService(self.root).begin("all")
         self.assertTrue(task["claimed"])
         self.assertFalse(again["claimed"])
         self.assertEqual(task["task_id"], again["task_id"])
         self.assertEqual(Path(task["worktree"]).parent, self.root / ".runtime" / "worktrees")
         for prepared in (task, again):
-            self.assertNotIn("token_budget", prepared)
-            self.assertNotIn("count_argv", prepared)
-        payload = AssistantWriteManager(self.root, role="guidance-curator").read(task["task_id"]).input_data
+            self.assertNotIn("token_budgets", prepared)
+        payload = AssistantWriteManager(self.root, role="curation-parent").read(task["task_id"]).input_data
         self.assertEqual(payload["candidates"][0]["candidate_id"], candidate_id)
         self.assertTrue(Path(task["instructions_file"]).is_file())
 
@@ -230,12 +265,12 @@ class LearningServiceTests(IsolatedWriteTestBase):
             task = self.service.begin("guidance", mode="maintain")
         worktree = Path(task["worktree"])
         self.assertFalse((worktree / "rightmemory.toml").exists())
-        self.assertEqual(task["token_budget"]["token_limit"], 20)
-        self.assertEqual(task["token_budget"]["retained_text_tokens"], active["retained_text_tokens"])
-        self.assertEqual(task["count_argv"], [
-            "rightmemory", "curate", "--root", str(self.root), "count",
-            "--domain", "guidance", "--task", task["task_id"],
-        ])
+        self.assertEqual(set(task["token_budgets"]), {"guidance"})
+        budget = task["token_budgets"]["guidance"]
+        self.assertEqual(budget["token_limit"], 20)
+        self.assertEqual(budget["retained_text_tokens"], active["retained_text_tokens"])
+        with self.assertRaises(ValueError):
+            self.service.count("skills", task["task_id"])
 
         edit = worktree / "learning/guidance/work.md"
         edit.parent.mkdir(parents=True, exist_ok=True)
@@ -248,43 +283,135 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertEqual(self.service.count("guidance"), active)
         self.assertEqual(self._git("status", "--porcelain", cwd=worktree), before)
 
-    def test_domains_complete_independently_and_last_completion_retires_raw(self):
+    def test_children_share_one_worktree_and_only_parent_publishes_all_results(self):
         candidate_id = self._submit()
-        guidance = self.service.begin("guidance")
-        skills = self.service.begin("skills")
-        self._commit(guidance, "learning/guidance/working.md", "# Working preferences\n\nAn observed preference.\n")
-        result = self.service.complete(guidance["task_id"], "Retained one preference")
-        self.assertEqual(result["status"], "completed")
-        self.assertFalse(list_learning_candidates(self.root, domain="guidance"))
-        self.assertEqual(len(list_learning_candidates(self.root, domain="skills")), 1)
-        self.assertEqual(len(list_learning_candidates(self.root)), 1)
-        self.assertFalse(Path(guidance["worktree"]).exists())
-
-        no_change = self.service.complete(skills["task_id"], "No durable method yet")
-        self.assertEqual(no_change["changed_paths"], [])
-        self.assertFalse(list_learning_candidates(self.root, domain="skills"))
-        self.assertTrue((self.root / "learning/candidates" / f"{candidate_id}.json").is_file())
+        task = self.service.begin()
+        task_id = task["task_id"]
+        worktree = Path(task["worktree"])
         head = self._git("rev-parse", "HEAD")
-        replay = LearningService(self.root).complete(skills["task_id"])
-        self.assertEqual(replay["landed_commit"], no_change["landed_commit"])
+        source = self.root / "learning/candidates" / f"{candidate_id}.json"
+        guidance = "learning/guidance/working.md"
+        skill = "learning/skills/review/SKILL.md"
+        initial_memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+        edits = {
+            "memory": ("MEMORY.md", initial_memory.replace("initial memory", "reviewed memory")),
+            "guidance": (guidance, "# Working preferences\n\nAn observed preference.\n"),
+            "skills": (skill, "# Review\n\nCheck the source.\n"),
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "completed domain work"):
+            self.service.complete(task_id)
+        children = {domain: self.service.begin_child(task_id, domain) for domain in LEARNING_DOMAINS}
+        for child in children.values():
+            self.assertEqual(child["worktree"], task["worktree"])
+            self.assertTrue(Path(child["instructions_file"]).is_file())
+        for domain, (relative, content) in edits.items():
+            with self.subTest(domain=domain):
+                child = children[domain]
+                path = worktree / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "completed domain work"):
+                    self.service.complete(task_id)
+                returned = self.service.complete_child(task_id, domain, child["attempt"], f"Reviewed {domain}")
+                self.assertEqual(returned["status"], "completed")
+                self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self.assertTrue(source.is_file())
+                self.assertFalse(list((self.root / "learning/processed").glob("*/*.json")))
+                self.assertEqual((self.root / "MEMORY.md").read_text(encoding="utf-8"), initial_memory)
+                self.assertFalse((self.root / guidance).exists())
+                self.assertFalse((self.root / skill).exists())
+
+        with self.assertRaisesRegex(RuntimeError, "uncommitted"):
+            self.service.complete(task_id)
         self.assertEqual(self._git("rev-parse", "HEAD"), head)
-        memory = self.service.begin("memory")
-        memory_result = self.service.complete(memory["task_id"])
-        self.assertEqual(memory_result["changed_paths"], [])
+        changed_paths = {relative for relative, _content in edits.values()}
+        self._git("add", "--", *sorted(changed_paths), cwd=worktree)
+        self._git("commit", "-m", "review combined contributions", cwd=worktree)
+        result = self.service.complete(task_id, "Reviewed all contributions")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(set(result["changed_paths"]), changed_paths)
+        for relative, content in edits.values():
+            self.assertEqual((self.root / relative).read_text(encoding="utf-8"), content)
+        self.assertFalse(worktree.exists())
+        self.assertFalse(source.exists())
         self.assertFalse(list_learning_candidates(self.root))
         for domain in LEARNING_DOMAINS:
             self.assertTrue((self.root / f"learning/processed/{domain}/{candidate_id}.json").is_file())
+        replay = LearningService(self.root).complete(task_id)
+        self.assertEqual(replay["landed_commit"], result["landed_commit"])
+        self.assertEqual(self._git("rev-parse", "HEAD"), result["landed_commit"])
         retried = self.service.submit("session-one", "A reusable observation", "request-one")
         self.assertFalse(retried["created"])
         self.assertFalse(list_learning_candidates(self.root))
 
+    def test_retry_child_fences_the_old_attempt_and_resumes_its_replacement(self):
+        self._submit()
+        task = self.service.begin()
+        task_id = task["task_id"]
+        previous = self.service.begin_child(task_id, "memory")
+        self.assertEqual(self.service.begin_child(task_id, "memory")["attempt"], previous["attempt"])
+        restarted = LearningService(self.root)
+        replacement = restarted.begin_child(task_id, "memory", retry=True)
+        self.assertNotEqual(previous["attempt"], replacement["attempt"])
+        self.assertEqual(previous["worktree"], replacement["worktree"])
+        with self.assertRaises(LearningClaimLost):
+            self.service.complete_child(task_id, "memory", previous["attempt"])
+        returned = restarted.complete_child(task_id, "memory", replacement["attempt"], "No change")
+        self.assertEqual(returned["status"], "completed")
+        self.assertEqual(restarted.complete_child(task_id, "memory", replacement["attempt"], "No change"), returned)
+
+    def test_child_git_guard_can_read_while_the_index_is_locked(self):
+        task = self.service.begin("guidance", mode="maintain")
+        task_id = task["task_id"]
+        worktree = Path(task["worktree"])
+        index = worktree / self._git("rev-parse", "--git-path", "index", cwd=worktree)
+        original_index = index.read_bytes()
+        lock = index.with_name("index.lock")
+        with lock.open("xb") as stream:
+            stream.write(b"held by another Git command")
+        try:
+            child = self.service.begin_child(task_id, "guidance")
+            returned = self.service.complete_child(task_id, "guidance", child["attempt"])
+            self.assertEqual(returned["status"], "completed")
+            self.assertEqual(index.read_bytes(), original_index)
+            self.assertEqual(lock.read_bytes(), b"held by another Git command")
+        finally:
+            lock.unlink(missing_ok=True)
+
+    def test_child_git_staging_and_commits_are_rejected(self):
+        self._submit()
+        task = self.service.begin("guidance", mode="maintain")
+        task_id = task["task_id"]
+        worktree = Path(task["worktree"])
+        head = self._git("rev-parse", "HEAD")
+        edit = worktree / "learning/guidance/work.md"
+        edit.parent.mkdir(parents=True)
+        edit.write_text("# Working guidance\n", encoding="utf-8")
+        for commit in (False, True):
+            with self.subTest(commit=commit):
+                attempt = self.service.begin_child(task_id, "guidance", retry=True)["attempt"]
+                self._git("add", "learning/guidance/work.md", cwd=worktree)
+                if commit:
+                    self._git("commit", "-m", "child commit is forbidden", cwd=worktree)
+                with self.assertRaisesRegex(RuntimeError, "Git history or staging"):
+                    self.service.complete_child(task_id, "guidance", attempt)
+                self.assertEqual(self.service.status(task_id)["children"]["guidance"]["status"], "failed")
+                with self.assertRaisesRegex(RuntimeError, "completed domain work"):
+                    self.service.complete(task_id)
+                if not commit:
+                    self._git("reset", "HEAD", "--", "learning/guidance/work.md", cwd=worktree)
+        self.assertEqual(self._git("rev-parse", "HEAD"), head)
+        self.assertFalse((self.root / "learning/guidance/work.md").exists())
+
     def test_new_raw_evidence_waits_for_the_next_batch(self):
-        first = self._submit()
-        task = self.service.begin("guidance")
+        self._submit()
+        task = self.service.begin("all")
+        self._finish_children(task)
         later = self._submit("A later observation", "request-two")
         self.service.complete(task["task_id"])
         self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root, domain="guidance")], [later])
-        self.assertEqual({item.candidate_id for item in list_learning_candidates(self.root)}, {first, later})
+        self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root)], [later])
 
     def test_maintenance_leaves_pending_evidence_ready_for_update(self):
         existing = self.root / "learning/guidance/working.md"
@@ -297,6 +424,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
             self._submit("Another pending observation", "second"),
         }
         task = self.service.begin("guidance", mode="maintain", scope="working.md")
+        self._finish_children(task)
         self.assertEqual(task["selected_candidate_count"], 0)
         self._commit(task, "learning/guidance/working.md", "# Existing guidance\n\nClarified scoped preference.\n")
         completed = self.service.complete(task["task_id"])
@@ -304,19 +432,20 @@ class LearningServiceTests(IsolatedWriteTestBase):
         for domain in LEARNING_DOMAINS:
             self.assertEqual({item.candidate_id for item in list_learning_candidates(self.root, domain=domain)}, candidate_ids)
         self.assertFalse(list((self.root / "learning/processed").glob("*/*.json")))
-        notice = next(item for item in completed["curation"] if item["domain"] == "guidance")
+        notice = next(item for item in completed["curation"] if item["domain"] == "all")
         self.assertTrue(notice["ready"])
         self.assertEqual(notice["candidate_count"], 2)
 
     def test_update_bounds_candidate_count_and_leaves_backlog_ready(self):
         candidate_ids = [self._submit(f"Observation {index}", f"request-{index}") for index in range(20 + 2)]
-        task = self.service.begin("guidance")
+        task = self.service.begin("all")
+        self._finish_children(task)
         self.assertEqual(task["selected_candidate_count"], 20)
         self.assertEqual(self.service.status(task["task_id"])["selected_candidate_count"], 20)
         completed = self.service.complete(task["task_id"])
         self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root, domain="guidance")], candidate_ids[20:])
-        self.assertEqual(len(list_learning_candidates(self.root, domain="skills")), len(candidate_ids))
-        notice = next(item for item in completed["curation"] if item["domain"] == "guidance")
+        self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root)], candidate_ids[20:])
+        notice = next(item for item in completed["curation"] if item["domain"] == "all")
         self.assertTrue(notice["ready"])
         self.assertEqual(notice["candidate_count"], 2)
 
@@ -324,9 +453,10 @@ class LearningServiceTests(IsolatedWriteTestBase):
         size = 24_000 // 2 + 1
         first = self._submit("a" * size, "first")
         second = self._submit("b" * size, "second")
-        task = self.service.begin("skills")
+        task = self.service.begin("all")
+        self._finish_children(task)
         self.assertEqual(task["selected_candidate_count"], 1)
-        selected = AssistantWriteManager(self.root, role="skills-curator").read(task["task_id"]).input_data["candidates"]
+        selected = AssistantWriteManager(self.root, role="curation-parent").read(task["task_id"]).input_data["candidates"]
         self.assertEqual(selected[0]["candidate_id"], first)
         self.assertTrue(all("evidence" not in item for item in selected))
         self.service.complete(task["task_id"])
@@ -335,8 +465,8 @@ class LearningServiceTests(IsolatedWriteTestBase):
     def test_oversized_first_source_uses_a_reference_and_keeps_its_frozen_proof(self):
         evidence = "x" * (24_000 + 5000)
         candidate_id = self._submit(evidence)
-        task = self.service.begin("skills")
-        manager = AssistantWriteManager(self.root, role="skills-curator")
+        task = self.service.begin("all")
+        manager = AssistantWriteManager(self.root, role="curation-parent")
         frozen = manager.read(task["task_id"]).input_data
         selected = frozen["candidates"]
         self.assertEqual(len(selected), 1)
@@ -348,19 +478,21 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertEqual(selected[0]["evidence_sha256"], stored.evidence_sha256)
         self.assertTrue((Path(task["worktree"]) / selected[0]["source_file"]).is_file())
         later = self._submit("New arrival after preparation", "later")
-        repeated = LearningService(self.root).begin("skills")
+        repeated = LearningService(self.root).begin("all")
         self.assertEqual(repeated["task_id"], task["task_id"])
-        replacement = self.service.begin("skills", retry_task=task["task_id"])
+        replacement = self.service.begin("all", retry_task=task["task_id"])
         self.assertEqual(manager.read(replacement["task_id"]).input_data, frozen)
+        self._finish_children(replacement)
         self.service.complete(replacement["task_id"])
         self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root, domain="skills")], [later])
 
     def test_referenced_source_is_hash_checked_at_completion(self):
         candidate_id = self._submit("x" * (24_000 + 1))
-        task = self.service.begin("guidance")
+        task = self.service.begin("all")
+        self._finish_children(task)
         relative = f"learning/candidates/{candidate_id}.json"
         source = self.root / relative
-        data = json.loads(source.read_text())
+        data = json.loads(source.read_text(encoding="utf-8"))
         data["evidence"] = "y" + data["evidence"][1:]
         data["evidence_sha256"] = hashlib.sha256(data["evidence"].encode("utf-8")).hexdigest()
         source.write_text(json.dumps(data))
@@ -370,42 +502,66 @@ class LearningServiceTests(IsolatedWriteTestBase):
             self.service.complete(task["task_id"])
         self.assertFalse((self.root / f"learning/processed/guidance/{candidate_id}.json").exists())
 
-    def test_legacy_skill_edits_do_not_invalidate_the_guidance_task(self):
-        self._append_memory(self.root, "\n## Review {S#review}\n")
-        (self.root / "MEMORY_SKILL_review.md").write_text("Review the source.\n")
-        self._git("add", "MEMORY.md", "MEMORY_SKILL_review.md")
-        self._git("commit", "-m", "seed legacy skill")
+    def test_all_update_rejects_stale_result_after_external_skill_edit(self):
+        relative = "learning/skills/review/SKILL.md"
+        skill = self.root / relative
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# Review\n\nReview the source.\n", encoding="utf-8")
+        self._git("add", relative)
+        self._git("commit", "-m", "seed skill")
         self._submit()
-        guidance = self.service.begin("guidance")
-        skills = self.service.begin("skills")
-        self._commit(skills, "MEMORY_SKILL_review.md", "Review the source and check the result.\n")
-        self.service.complete(skills["task_id"])
-        result = self.service.complete(guidance["task_id"])
-        self.assertEqual(result["status"], "completed")
-        self.assertFalse(list_learning_candidates(self.root, domain="guidance"))
-
-    def test_curator_cannot_edit_the_other_domain(self):
-        self._submit()
-        task = self.service.begin("guidance")
-        self._commit(task, "learning/experiences/case.md", "# Case\n\nOutside this curator.\n")
-        with self.assertRaisesRegex(RuntimeError, "non-memory paths"):
+        task = self.service.begin()
+        self._finish_children(task)
+        skill.write_text("# Review\n\nReview the source and check the result.\n", encoding="utf-8")
+        self._git("add", relative)
+        self._git("commit", "-m", "another writer changed skills")
+        head = self._git("rev-parse", "HEAD")
+        with self.assertRaises(AssistantStaleVersionError):
             self.service.complete(task["task_id"])
-        self.assertFalse((self.root / "learning/experiences/case.md").exists())
-        self.assertEqual(len(list_learning_candidates(self.root, domain="guidance")), 1)
+        self.assertEqual(self._git("rev-parse", "HEAD"), head)
+        self.assertEqual(len(list_learning_candidates(self.root)), 1)
 
-    def test_curator_cannot_edit_normal_memory(self):
+    def test_single_domain_maintenance_cannot_publish_other_domain_edits(self):
         self._submit()
-        task = self.service.begin("skills")
+        task = self.service.begin("guidance", mode="maintain")
+        with self.assertRaises(ValueError):
+            self.service.begin_child(task["task_id"], "skills")
+        self._finish_children(task)
+        worktree = Path(task["worktree"])
+        base = self._git("rev-parse", "HEAD", cwd=worktree)
+        relative = "learning/experiences/case.md"
+        self._commit(task, relative, "# Case\n\nOutside this curator.\n")
+        head = self._git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(ValueError, "outside its requested domains"):
+            self.service.complete(task["task_id"])
+        self.assertEqual(self._git("rev-parse", "HEAD"), head)
+        self.assertFalse((self.root / relative).exists())
+        self.assertEqual(len(list_learning_candidates(self.root)), 1)
+
+        self._git("reset", "--hard", base, cwd=worktree)
+        guidance = "learning/guidance/work.md"
+        self._commit(task, guidance, "# Scoped guidance\n")
+        corrected = self.service.complete(task["task_id"])
+        self.assertEqual(corrected["changed_paths"], [guidance])
+        self.assertTrue((self.root / guidance).is_file())
+        self.assertFalse((self.root / relative).exists())
+        self.assertEqual(len(list_learning_candidates(self.root)), 1)
+
+    def test_skills_maintenance_cannot_publish_memory_edits(self):
+        self._submit()
+        task = self.service.begin("skills", mode="maintain")
+        self._finish_children(task)
         self._commit(task, "MEMORY.md", "# Domain {#domain}\n\n- `one` changed → []\n")
-        with self.assertRaisesRegex(RuntimeError, "non-memory paths"):
+        with self.assertRaisesRegex(ValueError, "outside its requested domains"):
             self.service.complete(task["task_id"])
-        self.assertIn("initial memory", (self.root / "MEMORY.md").read_text())
+        self.assertIn("initial memory", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
 
     def test_curator_cannot_modify_raw_evidence(self):
         candidate_id = self._submit()
         task = self.service.begin("guidance", mode="maintain")
+        self._finish_children(task)
         relative = f"learning/candidates/{candidate_id}.json"
-        content = json.loads((Path(task["worktree"]) / relative).read_text())
+        content = json.loads((Path(task["worktree"]) / relative).read_text(encoding="utf-8"))
         content["evidence"] = "rewritten evidence"
         self._commit(task, relative, json.dumps(content))
         with self.assertRaisesRegex(RuntimeError, "non-memory paths"):
@@ -414,7 +570,8 @@ class LearningServiceTests(IsolatedWriteTestBase):
 
     def test_curator_cannot_write_processing_receipts(self):
         candidate_id = self._submit()
-        task = self.service.begin("guidance")
+        task = self.service.begin("all")
+        self._finish_children(task)
         self._commit(task, f"learning/processed/guidance/{candidate_id}.json", "{}")
         with self.assertRaisesRegex(RuntimeError, "non-memory paths"):
             self.service.complete(task["task_id"])
@@ -423,6 +580,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
     def test_maintenance_cannot_delete_program_owned_raw(self):
         candidate_id = self._submit()
         task = self.service.begin("guidance", mode="maintain")
+        self._finish_children(task)
         worktree = Path(task["worktree"])
         self._git("rm", f"learning/candidates/{candidate_id}.json", cwd=worktree)
         self._git("commit", "-m", "premature retirement", cwd=worktree)
@@ -430,29 +588,30 @@ class LearningServiceTests(IsolatedWriteTestBase):
             self.service.complete(task["task_id"])
         self.assertEqual(len(list_learning_candidates(self.root)), 1)
 
-    def test_completed_tasks_keep_proofs_and_remove_active_manifests(self):
+    def test_completed_parent_keeps_proofs_and_removes_active_manifests(self):
         evidence = "A concrete piece of evidence that should leave the candidate store"
         candidate_id = self._submit(evidence)
-        for domain in LEARNING_DOMAINS:
-            task = self.service.begin(domain)
-            result = self.service.complete(task["task_id"])
-            record = self.service._task(task["task_id"])
-            selected = record["input"]["candidates"]
-            self.assertEqual([item["candidate_id"] for item in selected], [candidate_id])
-            self.assertNotIn("evidence", selected[0])
-            operation = SemanticOperationStore(self.root).read(result["operation_id"])
-            self.assertEqual(operation.input_data, {
-                "role": "update" if domain == "memory" else f"{domain}-curator",
-                "kind": "curation", "task_id": task["task_id"],
-            })
-            self.assertFalse(Path(task["candidates_file"]).exists())
-            self.assertFalse(Path(task["instructions_file"]).exists())
-            self.assertFalse(Path(task["worktree"]).exists())
+        task = self.service.begin()
+        children = self._finish_children(task)
+        result = self.service.complete(task["task_id"])
+        record = self.service._task(task["task_id"])
+        selected = record["input"]["candidates"]
+        self.assertEqual([item["candidate_id"] for item in selected], [candidate_id])
+        self.assertNotIn("evidence", selected[0])
+        operation = SemanticOperationStore(self.root).read(result["operation_id"])
+        self.assertEqual(operation.input_data, {
+            "role": "curation-parent", "kind": "curation", "task_id": task["task_id"],
+        })
+        for artifact in ("candidates_file", "instructions_file", "worktree"):
+            self.assertFalse(Path(task[artifact]).exists())
+        for child in children:
+            self.assertFalse(Path(child["instructions_file"]).exists())
         self.assertFalse(list_learning_candidates(self.root))
 
-    def test_same_domain_changes_require_retry_and_fence_old_task(self):
+    def test_external_guidance_change_requires_parent_retry_and_fences_old_task(self):
         self._submit()
-        task = self.service.begin("guidance")
+        task = self.service.begin("all")
+        self._finish_children(task)
         path = self.root / "learning/guidance/new.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# New related guidance\n")
@@ -460,30 +619,37 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self._git("commit", "-m", "another writer changed guidance")
         with self.assertRaises(AssistantStaleVersionError):
             self.service.complete(task["task_id"])
-        replacement = self.service.begin("guidance", retry_task=task["task_id"])
+        replacement = self.service.begin("all", retry_task=task["task_id"])
+        self._finish_children(replacement)
         self.assertNotEqual(replacement["task_id"], task["task_id"])
         self.assertTrue(Path(task["worktree"]).exists())
         with self.assertRaises(LearningClaimLost):
             self.service.complete(task["task_id"])
         self.service.complete(replacement["task_id"])
 
-    def test_update_cannot_delete_evidence_still_pending_for_another_domain(self):
-        old = self._submit()
-        for domain in ("guidance", "skills"):
-            task = self.service.begin(domain)
-            self.service.complete(task["task_id"])
+    def test_update_cannot_delete_evidence_outside_its_selected_batch(self):
+        (self.root / "rightmemory.toml").write_text(
+            "[curation.batch]\ntrigger_candidates = 1\ntarget_batch_candidates = 1\n", encoding="utf-8",
+        )
+        self.service = LearningService(self.root)
+        self._submit()
         self._submit("New work to consider", "request-two")
-        task = self.service.begin("skills")
+        task = self.service.begin()
+        selected = set(self.service.coordinator.current_claim("all").candidate_ids)
+        remaining, = {item.candidate_id for item in list_learning_candidates(self.root)} - selected
+        self._finish_children(task)
         worktree = Path(task["worktree"])
-        self._git("rm", f"learning/candidates/{old}.json", cwd=worktree)
-        self._git("commit", "-m", "retire an old case during update", cwd=worktree)
+        relative = f"learning/candidates/{remaining}.json"
+        self._git("rm", relative, cwd=worktree)
+        self._git("commit", "-m", "retire unselected evidence", cwd=worktree)
         with self.assertRaisesRegex(RuntimeError, "non-memory paths"):
             self.service.complete(task["task_id"])
-        self.assertTrue((self.root / f"learning/candidates/{old}.json").is_file())
+        self.assertTrue((self.root / relative).is_file())
 
     def test_skill_assets_publish_as_regular_files(self):
         self._submit()
-        task = self.service.begin("skills")
+        task = self.service.begin("all")
+        self._finish_children(task)
         worktree = Path(task["worktree"])
         skill = worktree / "learning/skills/reproduce-report"
         skill.mkdir(parents=True)
@@ -496,12 +662,13 @@ class LearningServiceTests(IsolatedWriteTestBase):
 
     def test_prepared_completion_retries_without_repeating_curation(self):
         self._submit()
-        task = self.service.begin("skills")
+        task = self.service.begin("all")
+        self._finish_children(task)
         self._commit(task, "learning/experiences/case.md", "# Case\n\nUseful rough evidence.\n")
         with patch.object(LearningCoordinator, "finalize", side_effect=RuntimeError("interrupted")):
             with self.assertRaisesRegex(RuntimeError, "interrupted"):
                 self.service.complete(task["task_id"], "Retained a case")
-        writer = AssistantWriteManager(self.root, role="skills-curator")
+        writer = AssistantWriteManager(self.root, role="curation-parent")
         operation = SemanticOperationStore(self.root).read(writer.read(task["task_id"]).operation_id)
         self.assertEqual(operation.phase, "prepared")
         self.assertFalse((self.root / "learning/experiences/case.md").exists())
@@ -511,7 +678,8 @@ class LearningServiceTests(IsolatedWriteTestBase):
 
     def test_lost_reply_after_publication_is_recovered_by_status(self):
         self._submit()
-        task = self.service.begin("guidance")
+        task = self.service.begin("all")
+        self._finish_children(task)
         original = LearningCoordinator.finalize
 
         def lose_reply(coordinator, *args, **kwargs):
@@ -529,7 +697,8 @@ class LearningServiceTests(IsolatedWriteTestBase):
 
     def test_worker_recovers_publication_before_next_batch_retry_budget(self):
         self._submit()
-        task = self.service.begin("guidance", _executor="configured")
+        task = self.service.begin(_executor="configured")
+        self._finish_children(task)
         original = LearningCoordinator.finalize
 
         def lose_reply(coordinator, *args, **kwargs):
@@ -541,35 +710,23 @@ class LearningServiceTests(IsolatedWriteTestBase):
                 self.service.complete(task["task_id"])
         self._submit("A separate later observation", "request-two")
         worker = CurationWorker(self.root)
-        worker._write({"failures": {"guidance": {
+        worker._write({"failures": {"all": {
             "task_id": task["task_id"], "attempts": 1,
             "error": "lost reply", "next_retry_at": None,
         }}})
         calls = []
 
-        class Executor:
-            def __init__(self, config, *, curation_mode):
-                pass
-
-            def run_session_turn(self, task_id, _message):
+        def turn(config, _mode, task_id):
+            if config.role == "curation-parent":
                 calls.append(task_id)
                 if len(calls) == 1:
                     raise RuntimeError("first attempt for the new batch failed")
-                return "No additional guidance needed"
+                for domain in LEARNING_DOMAINS:
+                    self.service.run_child(task_id, domain)
+            return "No additional guidance needed"
 
-            def cleanup(self):
-                pass
-
-        notices = self.service.notices
         with (
-            patch.object(self.service, "notices",
-                         side_effect=lambda: [item for item in notices()
-                                              if item["domain"] == "guidance"]),
-            patch("rightmemory.runtime.RightMemoryRuntime", Executor),
-            patch("rightmemory.config.load_config",
-                  side_effect=lambda role, memory_root: RuntimeConfig(
-                      role=role, memory_root=memory_root,
-                      sync=load_sync_config(memory_root))),
+            self._configured_executor(turn),
             patch("rightmemory.curation_worker.RETRY_COOLDOWN_SECONDS", 0),
         ):
             self.assertEqual(worker.run(self.service), 0)
@@ -577,64 +734,190 @@ class LearningServiceTests(IsolatedWriteTestBase):
         self.assertEqual(calls[0], calls[1])
         self.assertNotEqual(calls[0], task["task_id"])
         self.assertEqual(worker.status()["failures"], {})
-        self.assertFalse(list_learning_candidates(self.root, domain="guidance"))
+        self.assertFalse(list_learning_candidates(self.root))
 
-    def test_configured_execution_resumes_failed_task_and_uses_prepared_worktree(self):
+    def test_configured_parent_resumes_failed_task_and_runs_children_in_same_worktree(self):
         self._submit()
-        configurations = []
-        modes = []
         calls = []
-        owner = self
+        relative = "learning/guidance/work.md"
 
-        class Executor:
-            def __init__(self, config, *, curation_mode):
-                configurations.append(config)
-                modes.append(curation_mode)
-                self.config = config
+        def turn(config, mode, task_id):
+            calls.append((config, mode, task_id))
+            if len(calls) == 1:
+                raise RuntimeError("provider unavailable")
+            if config.role == "curation-parent":
+                head = self._git("rev-parse", "HEAD")
+                for domain in LEARNING_DOMAINS:
+                    child = self.service.run_child(task_id, domain)
+                    self.assertEqual(child["status"], "completed")
+                    self.assertEqual(Path(child["worktree"]), config.memory_root)
+                    self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self._git("add", relative, cwd=config.memory_root)
+                self._git("commit", "-m", "review combined contributions", cwd=config.memory_root)
+            elif config.role == "guidance-curator":
+                edit = config.memory_root / relative
+                edit.parent.mkdir(parents=True)
+                edit.write_text("# Working guidance\n", encoding="utf-8")
+            return "Done"
 
-            def run_session_turn(self, task_id, _message):
-                calls.append(task_id)
-                if len(calls) == 1:
-                    raise RuntimeError("provider unavailable")
-                owner._commit({"worktree": str(self.config.memory_root)}, "learning/guidance/work.md", "# Working guidance\n")
-                return "Done"
-
-            def cleanup(self):
-                pass
-
-        config = RuntimeConfig(role="guidance-curator", model_id="fake", memory_root=self.root, state_root=self.root)
-        with patch("rightmemory.config.load_config", return_value=config), patch("rightmemory.runtime.RightMemoryRuntime", Executor):
+        with self._configured_executor(turn):
             with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
-                self.service.run("guidance")
+                self.service.run()
             self._use_default_batch_policy()
-            notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+            notice, = self.service.notices()
             self.assertTrue(notice["ready"])
             self.assertEqual(notice["status"], "resume")
-            completed = LearningService(self.root).run("guidance")
+            completed = self.service.run()
         self.assertEqual(completed["status"], "completed")
-        self.assertEqual(calls[0], calls[1])
-        self.assertEqual(modes, ["update", "update"])
-        self.assertEqual(configurations[-1].state_root, self.root)
-        self.assertNotEqual(configurations[-1].memory_root, self.root)
-        self.assertFalse(configurations[-1].sync.enabled)
+        self.assertEqual(completed["changed_paths"], [relative])
+        self.assertEqual([config.role for config, _, _ in calls], [
+            "curation-parent", "curation-parent", "update", "guidance-curator", "skills-curator",
+        ])
+        worktree = calls[0][0].memory_root
+        self.assertNotEqual(worktree, self.root)
+        for config, mode, task_id in calls:
+            self.assertEqual(config.memory_root, worktree)
+            self.assertEqual(config.state_root, self.root)
+            self.assertFalse(config.sync.enabled)
+            self.assertEqual(mode, "update")
+            self.assertEqual(task_id, completed["task_id"])
+        self.assertTrue((self.root / relative).is_file())
+        self.assertFalse(list_learning_candidates(self.root))
+
+    def test_configured_domain_turns_overlap_until_parent_publication(self):
+        from pydantic_ai import Agent
+        from pydantic_ai.messages import ModelResponse, TextPart
+        from pydantic_ai.models.function import FunctionModel
+
+        for mode in ("standalone", "cli-agent"):
+            with self.subTest(mode=mode):
+                candidate_id = self._submit(request=mode)
+                task = self.service.begin(_executor="configured")
+                task_id = task["task_id"]
+                worktree = Path(task["worktree"])
+                head = self._git("rev-parse", "HEAD")
+                initial_memory = (self.root / "MEMORY.md").read_text(encoding="utf-8")
+                guidance = f"learning/guidance/{mode}.md"
+                addition = f"\n- `{mode}` reviewed memory → []\n"
+                entered = {"update": Event(), "guidance-curator": Event()}
+                release = Event()
+
+                def turn(runtime):
+                    self.assertEqual(runtime.config.memory_root, worktree)
+                    self.assertEqual(runtime.config.state_root, self.root)
+                    role = runtime.config.role
+                    if role == "update":
+                        self._append_memory(worktree, addition)
+                    elif role == "guidance-curator":
+                        runtime.tools.create_file(guidance, "# Reviewed guidance\n")
+                    if role in entered:
+                        entered[role].set()
+                        self.assertTrue(release.wait(30), "test did not release the domain turn")
+                    return "Reviewed"
+
+                def build_standalone(runtime):
+                    def respond(_messages, _info):
+                        return ModelResponse(parts=[TextPart(turn(runtime))])
+
+                    return Agent(FunctionModel(respond))
+
+                def build_cli(runtime):
+                    return SimpleNamespace(run_one_shot_turn=lambda _session, _message: turn(runtime))
+
+                with (
+                    patch("rightmemory.config.load_config", side_effect=lambda role, memory_root: RuntimeConfig(
+                        role=role, model_id="fixture", memory_root=memory_root, runtime_mode=mode,
+                    )),
+                    patch.object(RightMemoryRuntime, "_build_agent", build_standalone),
+                    patch.object(RightMemoryRuntime, "_build_cli_agent", build_cli),
+                    ThreadPoolExecutor(max_workers=3) as pool,
+                ):
+                    self.assertEqual(self.service.run_child(task_id, "skills")["status"], "completed")
+                    memory = pool.submit(self.service.run_child, task_id, "memory")
+                    advice = pool.submit(self.service.run_child, task_id, "guidance")
+                    try:
+                        self.assertTrue(entered["update"].wait(10), "memory turn did not start")
+                        self.assertTrue(entered["guidance-curator"].wait(10), "guidance turn did not overlap memory")
+                        children = self.service.status(task_id)["children"]
+                        self.assertEqual({domain: child["status"] for domain, child in children.items()}, {
+                            "memory": "running", "guidance": "running", "skills": "completed",
+                        })
+                        duplicate = pool.submit(self.service.run_child, task_id, "memory")
+                        with self.assertRaisesRegex(RuntimeError, "domain worker is still running"):
+                            duplicate.result(timeout=10)
+                        self.assertEqual(self.service.status(task_id)["children"], children)
+                        with self.assertRaisesRegex(RuntimeError, "completed domain work"):
+                            self.service.complete(task_id)
+                    finally:
+                        release.set()
+                    for child, future in (("memory", memory), ("guidance", advice)):
+                        returned = future.result(timeout=10)
+                        self.assertEqual(returned["status"], "completed")
+                        self.assertEqual(returned["attempt"], children[child]["attempt"])
+                        self.assertEqual(Path(returned["worktree"]), worktree)
+
+                self._git("add", "--", "MEMORY.md", guidance, cwd=worktree)
+                self._git("commit", "-m", "review parallel contributions", cwd=worktree)
+                self.assertEqual(self._git("rev-parse", "HEAD"), head)
+                self.assertEqual((self.root / "MEMORY.md").read_text(encoding="utf-8"), initial_memory)
+                self.assertFalse((self.root / guidance).exists())
+                receipts = [self.root / f"learning/processed/{domain}/{candidate_id}.json"
+                            for domain in LEARNING_DOMAINS]
+                self.assertFalse(any(receipt.exists() for receipt in receipts))
+                self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root)], [candidate_id])
+
+                result = self.service.complete(task_id)
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(set(result["changed_paths"]), {"MEMORY.md", guidance})
+                self.assertEqual((self.root / "MEMORY.md").read_text(encoding="utf-8"), initial_memory + addition)
+                self.assertTrue((self.root / guidance).is_file())
+                self.assertTrue(all(receipt.is_file() for receipt in receipts))
+                self.assertFalse(list_learning_candidates(self.root))
+
+    def test_parent_rejects_configured_child_edit_outside_requested_domain(self):
+        candidate_id = self._submit()
+        task = self.service.begin("guidance", mode="maintain")
+        worktree = Path(task["worktree"])
+        head = self._git("rev-parse", "HEAD")
+
+        def turn(config, _mode, _task_id):
+            self._append_memory(config.memory_root, "\n- `changed` foreign domain → []\n")
+            return "Done"
+
+        with self._configured_executor(turn):
+            self.assertEqual(self.service.run_child(task["task_id"], "guidance")["status"], "completed")
+        self._git("add", "--", "MEMORY.md", cwd=worktree)
+        self._git("commit", "-m", "review foreign domain edit", cwd=worktree)
+        with self.assertRaisesRegex(ValueError, "outside its requested domains"):
+            self.service.complete(task["task_id"])
+        self.assertEqual(self._git("rev-parse", "HEAD"), head)
+        self.assertNotIn("foreign domain", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
+        self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root)], [candidate_id])
 
     def test_configured_maintenance_retry_keeps_frozen_mode(self):
-        config = RuntimeConfig(role="guidance-curator", memory_root=self.root)
-        with (
-            patch("rightmemory.config.load_config", return_value=config),
-            patch("rightmemory.runtime.RightMemoryRuntime") as runtime,
-        ):
-            runtime.return_value.run_session_turn.side_effect = [RuntimeError("provider unavailable"), "Done"]
+        calls = []
+
+        def turn(config, mode, task_id):
+            calls.append((config.role, mode))
+            if len(calls) == 1:
+                raise RuntimeError("provider unavailable")
+            if config.role == "curation-parent":
+                self.service.run_child(task_id, "guidance")
+            return "Done"
+
+        with self._configured_executor(turn):
             with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
                 self.service.run("guidance", mode="maintain", scope="existing guidance")
-            notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+            notice, = self.service.notices()
             retry = self.service.begin("guidance", retry_task=notice["task_id"])
             self.assertEqual(retry["mode"], "maintain")
-            self.assertIn("token_budget", retry)
+            self.assertEqual(set(retry["token_budgets"]), {"guidance"})
             completed = self.service.run("guidance", mode="maintain", scope="existing guidance")
         self.assertEqual(completed["task_id"], retry["task_id"])
         self.assertEqual(completed["status"], "completed")
-        self.assertEqual([call.kwargs["curation_mode"] for call in runtime.call_args_list], ["maintain", "maintain"])
+        self.assertEqual(calls, [
+            ("curation-parent", "maintain"), ("curation-parent", "maintain"), ("guidance-curator", "maintain"),
+        ])
 
     def test_curator_executor_inherits_update_configuration(self):
         (self.root / "rightmemory.toml").write_text('[update.model]\nmodel_id = "example"\n')
@@ -645,13 +928,14 @@ class LearningServiceTests(IsolatedWriteTestBase):
 
     def test_requested_maintenance_is_not_satisfied_by_an_active_update(self):
         self._submit()
-        active = self.service.begin("skills")
+        active = self.service.begin("all")
+        self._finish_children(active)
         result = self.service.run("skills", mode="maintain", scope="older cases")
         self.assertEqual(result["status"], "active")
         self.assertEqual(result["task_id"], active["task_id"])
         self.assertEqual(result["requested_mode"], "maintain")
         self.assertEqual(result["requested_scope"], "older cases")
-        self.assertNotIn("token_budget", result)
+        self.assertNotIn("token_budgets", result)
         self.assertEqual(len(list_learning_candidates(self.root, domain="skills")), 1)
         self.service.complete(active["task_id"])
         maintenance = self.service.begin("skills", mode="maintain", scope="older cases")
@@ -661,12 +945,13 @@ class LearningServiceTests(IsolatedWriteTestBase):
     def test_memory_maintenance_uses_shared_writer_without_consuming_candidates(self):
         candidate_id = self._submit()
         task = self.service.begin("memory", mode="maintain", scope="domain")
+        self._finish_children(task)
         self.assertEqual(task["selected_candidate_count"], 0)
-        text = (Path(task["worktree"]) / "MEMORY.md").read_text()
+        text = (Path(task["worktree"]) / "MEMORY.md").read_text(encoding="utf-8")
         self._commit(task, "MEMORY.md", text.replace("initial memory", "maintained memory"))
         completed = self.service.complete(task["task_id"])
         self.assertEqual(completed["changed_paths"], ["MEMORY.md"])
-        self.assertIn("maintained memory", (self.root / "MEMORY.md").read_text())
+        self.assertIn("maintained memory", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
         for domain in LEARNING_DOMAINS:
             self.assertEqual(
                 [item.candidate_id for item in list_learning_candidates(self.root, domain=domain)],
@@ -677,12 +962,13 @@ class LearningServiceTests(IsolatedWriteTestBase):
     def test_explicit_retry_can_replace_foreign_claim_without_local_task(self):
         candidate_id = self._submit()
         foreign = LearningCoordinator(load_sync_config(self.root), holder_id="1" * 32)
-        claim = foreign.claim("guidance", task_id="guidance-" + "a" * 32).claim
-        notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+        claim = foreign.claim("all", task_id="all-" + "a" * 32).claim
+        notice = next(item for item in self.service.notices() if item["domain"] == "all")
         self.assertTrue(notice["foreign"])
         self.assertFalse(notice["ready"])
-        self.assertEqual(self.service.begin("guidance")["task_id"], claim.task_id)
-        replacement = self.service.begin("guidance", retry_task=claim.task_id)
+        self.assertEqual(self.service.begin("all")["task_id"], claim.task_id)
+        replacement = self.service.begin("all", retry_task=claim.task_id)
+        self._finish_children(replacement)
         self.assertTrue(replacement["claimed"])
         self.assertNotEqual(replacement["task_id"], claim.task_id)
         self.assertEqual(replacement["selected_candidate_count"], 1)
@@ -690,26 +976,44 @@ class LearningServiceTests(IsolatedWriteTestBase):
             foreign.finalize(claim, None, prepared_start_commit=claim.base_commit)
         self.service.complete(replacement["task_id"])
         self.assertFalse(list_learning_candidates(self.root, domain="guidance"))
-        self.assertEqual(list_learning_candidates(self.root)[0].candidate_id, candidate_id)
+        self.assertEqual(list_learning_candidates(self.root), ())
+        for domain in LEARNING_DOMAINS:
+            self.assertTrue((self.root / f"learning/processed/{domain}/{candidate_id}.json").is_file())
 
     def test_replaced_local_task_is_reported_superseded_and_never_resumed(self):
         self._submit()
-        task = self.service.begin("guidance")
-        old = self.service.coordinator.current_claim("guidance")
+        task = self.service.begin("all")
+        old = self.service.coordinator.current_claim("all")
         foreign = LearningCoordinator(load_sync_config(self.root), holder_id="1" * 32)
         replacement = foreign.claim(
-            "guidance", task_id="guidance-" + "b" * 32, replace_token=old.token,
+            "all", task_id="all-" + "b" * 32, replace_token=old.token,
         ).claim
-        notice = next(item for item in self.service.notices() if item["domain"] == "guidance")
+        notice = next(item for item in self.service.notices() if item["domain"] == "all")
         self.assertEqual(notice["task_id"], replacement.task_id)
         self.assertTrue(notice["foreign"])
         status = self.service.status(task["task_id"])
         self.assertEqual(status["status"], "superseded")
         self.assertEqual(status["replacement_task"], replacement.task_id)
-        self.assertEqual(self.service.begin("guidance")["task_id"], replacement.task_id)
+        self.assertEqual(self.service.begin("all")["task_id"], replacement.task_id)
         with self.assertRaises(LearningClaimLost):
             self.service.complete(task["task_id"])
         self.assertTrue(Path(task["worktree"]).is_dir())
+
+    def test_notices_find_all_update_after_a_local_maintenance_parent_is_fenced(self):
+        self._submit()
+        maintenance = self.service.begin("guidance", mode="maintain")
+        old = self.service.coordinator.current_claim("guidance")
+        self.assertEqual(old.task_id, maintenance["task_id"])
+        foreign = LearningCoordinator(load_sync_config(self.root), holder_id="1" * 32)
+        replacement = foreign.claim("guidance", mode="maintain", replace_token=old.token).claim
+        foreign.finalize(replacement, None, prepared_start_commit=self._git("rev-parse", "HEAD"))
+        active = foreign.claim("all").claim
+
+        notice, = self.service.notices()
+        self.assertEqual(notice["domain"], "all")
+        self.assertEqual(notice["task_id"], active.task_id)
+        self.assertTrue(notice["foreign"])
+        self.assertFalse(notice["ready"])
 
     def test_submission_executor_controls_wake_without_ambiguating_saved_evidence(self):
         with patch("rightmemory.curation_worker.CurationWorker.wake", side_effect=OSError("worker unavailable")) as wake:
@@ -725,13 +1029,14 @@ class LearningServiceTests(IsolatedWriteTestBase):
         from rightmemory.install_core import InstallError, Installer
 
         self._submit()
-        task = self.service.begin("memory")
-        text = (Path(task["worktree"]) / "MEMORY.md").read_text()
+        task = self.service.begin("all")
+        self._finish_children(task)
+        text = (Path(task["worktree"]) / "MEMORY.md").read_text(encoding="utf-8")
         self._commit(task, "MEMORY.md", text + "- `retained` durable result → []\n")
         with patch("rightmemory.automatic_effects.publish_file_view_outbox", side_effect=OSError("hub offline")):
             completed = self.service.complete(task["task_id"])
         self.assertEqual(completed["status"], "completed")
-        self.assertIn("retained", (self.root / "MEMORY.md").read_text())
+        self.assertIn("retained", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
         self.assertEqual({effect["name"]: effect["status"] for effect in completed["effects"]}, {
             "memory-pressure": "done", "file-view-publish": "failed",
         })
@@ -740,7 +1045,7 @@ class LearningServiceTests(IsolatedWriteTestBase):
         later = self._submit("New evidence arriving before publication recovery", "later")
         self._use_default_batch_policy()
         before = {path.relative_to(self.root): path.read_bytes() for path in (self.root / ".runtime").rglob("*") if path.is_file() and not path.is_symlink()}
-        notice = next(item for item in self.service.notices() if item["domain"] == "memory")
+        notice = next(item for item in self.service.notices() if item["domain"] == "all")
         after = {path.relative_to(self.root): path.read_bytes() for path in (self.root / ".runtime").rglob("*") if path.is_file() and not path.is_symlink()}
         self.assertEqual(before, after)
         self.assertEqual(notice["status"], "effects_pending")
@@ -754,22 +1059,23 @@ class LearningServiceTests(IsolatedWriteTestBase):
             patch("rightmemory.runtime.RightMemoryRuntime", side_effect=AssertionError("model must not rerun")),
             patch("rightmemory.automatic_effects.publish_file_view_outbox", return_value=[]),
         ):
-            retried = self.service.run("memory")
+            retried = self.service.run("all")
         self.assertEqual(retried["status"], "completed")
         self.assertTrue(all(effect["status"] == "done" for effect in retried["effects"]))
         self.assertEqual(retried["task_id"], task["task_id"])
         self.assertEqual(InsightTriggerStore(self.root).read().points, points)
         self.assertEqual(self._git("rev-parse", "HEAD"), head)
         self.assertEqual([item.candidate_id for item in list_learning_candidates(self.root, domain="memory")], [later])
-        notice = next(item for item in self.service.notices() if item["domain"] == "memory")
+        notice = next(item for item in self.service.notices() if item["domain"] == "all")
         self.assertEqual(notice["status"], "waiting")
         self.assertEqual(notice["candidate_count"], 1)
         installer._require_installable_tasks()
 
     def test_lost_pressure_effect_receipt_does_not_increment_twice(self):
         self._submit()
-        task = self.service.begin("memory")
-        text = (Path(task["worktree"]) / "MEMORY.md").read_text()
+        task = self.service.begin("all")
+        self._finish_children(task)
+        text = (Path(task["worktree"]) / "MEMORY.md").read_text(encoding="utf-8")
         self._commit(task, "MEMORY.md", text + "- `retained` durable result → []\n")
         mark = SemanticOperationStore.mark_effect
         interrupted = []
@@ -791,7 +1097,8 @@ class LearningServiceTests(IsolatedWriteTestBase):
 
     def test_no_change_completion_does_not_add_memory_pressure(self):
         self._submit()
-        task = self.service.begin("memory")
+        task = self.service.begin("all")
+        self._finish_children(task)
         completed = self.service.complete(task["task_id"])
         self.assertEqual(completed["changed_paths"], [])
         self.assertEqual(InsightTriggerStore(self.root).read().points, 0)
@@ -799,7 +1106,8 @@ class LearningServiceTests(IsolatedWriteTestBase):
 
     def test_effect_store_failure_keeps_completed_outcome_recoverable(self):
         self._submit()
-        task = self.service.begin("memory")
+        task = self.service.begin("all")
+        self._finish_children(task)
         with patch("rightmemory.learning_service.replay_memory_operation_effects", side_effect=OSError("receipt store unavailable")):
             completed = self.service.complete(task["task_id"])
         self.assertEqual(completed["status"], "completed")

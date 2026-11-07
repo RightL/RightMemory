@@ -130,7 +130,7 @@ The human editor and an explicit `maintain-pursuit-map` request are the two norm
 
 Update, ordinary orchestration, and Memory maintenance may read Pursuit. They do not infer, submit, or apply map changes from progress, unfinished work, new ideas, or completion. Update can retain independently durable evidence from a mixed candidate while reporting its Pursuit portion as skipped. Sync repair can reconcile already-authorized map state within its existing bounded repair workflow.
 
-Internal executor modes install one automatic daily entry, the three domain maintenance skills, `maintain-pursuit-map`, and `rightmemory-manager`. Native assistant mode installs its daily entry and the same three domain curators. The maintenance skills do not invoke one another or exchange queued map work; Manager uses the workflow that owns the requested surface when the user explicitly asks to change RightMemory.
+Internal executor and native assistant modes each install their daily entry, `maintain-rightmemory-system`, and the three domain maintenance skills. Internal executor modes also install `maintain-pursuit-map` and `rightmemory-manager`. Manager uses the workflow that owns the requested surface when the user explicitly asks to change RightMemory.
 
 ## Implementation Entry Points
 

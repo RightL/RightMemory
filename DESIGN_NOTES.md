@@ -7,6 +7,22 @@ and skills each judge that evidence against their own core. Keeping submission s
 avoids requiring the working agent to decide too early whether an interaction will
 matter as personal context, collaboration guidance, or reusable method.
 
+A parent owns the usefulness and coherence of the affected state as a whole.
+Separate domain judgments can repeat the same account without added value, or omit
+useful material because each assumes another domain will keep it. The parent reviews
+retention and omission against the evidence and the existing domain cores, deciding
+what should remain and where before publication. Its core is shared by Update and
+Maintain; it does not replace the domains' learning purposes.
+
+Domain agents edit disjoint files in one isolated candidate worktree. Their changes
+are proposals until the parent has reviewed the combined files and made any needed corrections.
+The parent stages and commits; the program validates and publishes once. Sharing a
+worktree avoids merging three separately prepared versions of the same state.
+Update gives all three domains one evidence batch. Focused maintenance uses the same
+parent flow with only the requested domain writable. Domain execution remains
+available within a parent task for delegation and recovery, without separate
+publication or evidence retirement.
+
 Capture and generalization have different thresholds. Useful circumstances or partial
 work experience may deserve retention without becoming a broad rule or polished skill.
 Curators preserve that value in ordinary context, guidance cases, or experience files.
@@ -50,10 +66,10 @@ evidence for Update to process.
 
 Batch readiness and batch size serve separate purposes. Count and waiting-time
 triggers let related evidence accumulate and reduce repeated model work; size bounds
-limit each run. A shared batch record retains the evidence admitted by a trigger until
+limit each run. One shared batch record retains the evidence admitted by a trigger until
 all of it has been processed or withdrawn, so a size limit does not impose another
-waiting period on the remainder. Later submissions accumulate separately. All domains
-and executors use the same readiness policy, checked again against synchronized
+waiting period on the remainder. Later submissions accumulate separately. Both
+executors use the same readiness policy, checked again against synchronized
 evidence when acquiring a new claim. Recovery retains its existing evidence and
 proceeds without waiting for another batch to accumulate.
 
@@ -61,17 +77,25 @@ proceeds without waiting for another batch to accumulate.
 
 The shared service prepares isolated worktrees and publishes validated results for
 both executors. Configured submission wakes a bounded background worker. Native
-execution returns readiness to the main assistant, which delegates one agent to the
-prepared task. A notice does not acquire ownership, and an interrupted active task is
+execution returns readiness to the main assistant, which delegates one parent to the
+prepared task. That parent prepares domain attempts and delegates their work in the
+shared candidate. A notice does not acquire ownership, and an interrupted active task is
 not a new delegation request.
 
-A task retains its selected evidence across attempts. A shared domain claim fences
-publication, and configured execution also guards its local running worker. Claims do
+A task retains its selected evidence across attempts. One parent claim fences
+publication, and configured execution also guards its local parent and domain workers. Claims do
 not expire merely because native work is slow. Completion validates the result and
 publishes against the current claim. Prepared results and durable outcomes let an
 interrupted completion recover without repeating model judgment; unfinished program
 effects retry through completion as well. Explicit task retry replaces abandoned edits
-while fencing their old owner.
+while fencing their old owner. Domain attempt ids reject stale completions; child
+completion leaves live files and evidence receipts unchanged. In every execution mode,
+domain agents can work in parallel on their assigned files. The parent waits for them,
+reviews the combined result, and makes any needed corrections before committing.
+Standalone edit tools enforce domain file boundaries. CLI-agent and host-provided
+subagents use their own file tools, with assigned ownership and parent review.
+A whole-worktree comparison cannot attribute edits to one worker while others are
+editing, so publication validates the combined result against the requested scope.
 
 Native Retrieve prepares access to real source files and a compact learning index,
 then returns an attributed handoff with native file tools. This shares storage and

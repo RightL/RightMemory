@@ -19,7 +19,15 @@ class CurationCliTests(IsolatedWriteTestBase):
             status = (submit_main if submit else main)(["--root", str(self.root), *args])
         return status, json.loads(output.getvalue())
 
-    def test_single_submission_and_three_no_change_domains_retire_source(self):
+    def report_worker(self, task_id, domain):
+        code, worker = self.invoke(["worker-begin", "--task", task_id, "--domain", domain])
+        self.assertEqual(code, 0, worker)
+        code, reported = self.invoke([
+            "worker-complete", "--task", task_id, "--domain", domain, "--attempt", worker["attempt"],
+        ])
+        self.assertEqual(code, 0, reported)
+
+    def test_only_parent_completion_retires_source(self):
         (self.root / ".git/info").mkdir(exist_ok=True)
         with (self.root / ".git/info/exclude").open("a", encoding="utf-8") as stream:
             stream.write("\n/rightmemory.toml\n")
@@ -30,22 +38,28 @@ class CurationCliTests(IsolatedWriteTestBase):
         code, saved = self.invoke(args, submit=True)
         self.assertEqual(code, 0)
         self.assertEqual(saved["pending_domains"], ["memory", "guidance", "skills"])
+        self.assertEqual([notice["domain"] for notice in saved["curation"]], ["all"])
         captured = self._git("rev-parse", "HEAD")
         _, repeated = self.invoke(args, submit=True)
         self.assertFalse(repeated["created"])
         self.assertEqual(self._git("rev-parse", "HEAD"), captured)
         source_id = f"L#candidates/{saved['candidate_id']}.json"
         self.assertIn(source_id, learning_sources(self.root))
+        code, task = self.invoke(["begin"])
+        self.assertEqual(code, 0, task)
+        self.assertEqual(task["status"], "prepared")
+        task_id = task["task_id"]
+        claimed = self._git("rev-parse", "HEAD")
         for domain in ("memory", "guidance", "skills"):
-            _, task = self.invoke(["begin", "--domain", domain])
-            self.assertEqual(task["status"], "prepared")
-            self.assertNotIn("count_argv", task)
-            code, counted = self.invoke(["count", "--domain", domain, "--task", task["task_id"]])
+            code, counted = self.invoke(["count", "--domain", domain, "--task", task_id])
             self.assertEqual(code, 0)
-            self.assertEqual(counted["task_id"], task["task_id"])
-            _, done = self.invoke(["complete", "--task", task["task_id"]])
-            self.assertEqual(done["status"], "completed")
-            self.assertEqual(source_id in learning_sources(self.root), domain != "skills")
+            self.assertEqual(counted["task_id"], task_id)
+            self.report_worker(task_id, domain)
+            self.assertEqual(self._git("rev-parse", "HEAD"), claimed)
+            self.assertIn(source_id, learning_sources(self.root))
+        code, done = self.invoke(["complete", "--task", task_id])
+        self.assertEqual(code, 0, done)
+        self.assertEqual(done["status"], "completed")
         self.assertEqual(list_learning_candidates(self.root), ())
         _, repeated = self.invoke(args, submit=True)
         self.assertFalse(repeated["created"])
@@ -56,13 +70,14 @@ class CurationCliTests(IsolatedWriteTestBase):
             ["--executor", "native", "--session", "s", "One pending observation."], submit=True,
         )
         self.assertEqual(code, 0)
-        for notice in saved["curation"]:
-            self.assertFalse(notice["ready"])
-            self.assertEqual(notice["candidate_count"], 1)
-            self.assertIsNotNone(notice["next_ready_at"])
+        notice, = saved["curation"]
+        self.assertEqual(notice["domain"], "all")
+        self.assertFalse(notice["ready"])
+        self.assertEqual(notice["candidate_count"], 1)
+        self.assertIsNotNone(notice["next_ready_at"])
         captured = self._git("rev-parse", "HEAD")
         with patch("rightmemory.learning_coordinator.LearningCoordinator._worktree", side_effect=AssertionError("worktree created")):
-            code, waiting = self.invoke(["begin", "--domain", "memory"])
+            code, waiting = self.invoke(["begin"])
         self.assertEqual(code, 0)
         self.assertEqual(waiting["status"], "not_ready")
         self.assertEqual(learning_claims(self.root), ())
@@ -80,8 +95,21 @@ class CurationCliTests(IsolatedWriteTestBase):
         self.invoke(["--executor", "native", "--session", "s", "Case."], submit=True)
         _, task = self.invoke(["begin", "--domain", "memory", "--mode", "maintain", "--scope", "existing context"])
         self.assertEqual(task["selected_candidate_count"], 0)
-        self.invoke(["complete", "--task", task["task_id"]])
+        self.report_worker(task["task_id"], "memory")
+        code, done = self.invoke(["complete", "--task", task["task_id"]])
+        self.assertEqual(code, 0, done)
         self.assertEqual(len(list_learning_candidates(self.root, domain="memory")), 1)
+
+    def test_configured_run_dispatches_parent_and_child_separately(self):
+        with patch("rightmemory.curation_cli.LearningService") as factory:
+            service = factory.return_value
+            service.run.return_value = {"status": "completed"}
+            service.run_child.return_value = {"status": "completed"}
+            self.assertEqual(self.invoke(["run"])[0], 0)
+            service.run.assert_called_once_with("all", mode="update", scope="")
+            self.assertEqual(self.invoke(["worker-run", "--task", "parent", "--domain", "skills"])[0], 0)
+            service.run_child.assert_called_once_with("parent", "skills", instructions="")
+            service.complete.assert_not_called()
 
     def test_count_routes_to_active_root_or_prepared_task(self):
         code, active = self.invoke(["count", "--domain", "memory"])
@@ -93,13 +121,14 @@ class CurationCliTests(IsolatedWriteTestBase):
         self.assertFalse((self.root / ".runtime").exists())
 
         _, task = self.invoke(["begin", "--domain", "memory", "--mode", "maintain"])
-        code, count = self.invoke(task["count_argv"][4:])
+        code, count = self.invoke(["count", "--domain", "memory", "--task", task["task_id"]])
         self.assertEqual(code, 0)
         self.assertEqual(count["task_id"], task["task_id"])
         self.assertEqual(count["retained_text_tokens"], active["retained_text_tokens"])
 
         for args in (
             ["--domain", "invalid"],
+            ["--domain", "all"],
             ["--domain", "memory", "--task", "invalid"],
             ["--domain", "guidance", "--task", task["task_id"]],
         ):

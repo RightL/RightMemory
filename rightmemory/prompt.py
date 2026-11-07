@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from importlib import resources
 from pathlib import Path
-from shlex import quote
 
-from .config import MEMORY_ROOT_ENV
+from .config import CURATION_PARENT_ROLE
 from .learning import DOMAIN_ROLES
 from .reference import read_reference
 
 
 ROLE_PROMPTS = {
+    CURATION_PARENT_ROLE,
     "guidance-curator",
     "historian",
     "insight",
@@ -35,7 +35,7 @@ def build_cli_agent_instructions(
     role_guidance = _role_guidance(role, curation_mode)
     cli_agent_guidance = _cli_agent_guidance(memory_root, role)
     corrections_store = "- corrections.md\n" if role in {
-        "update", "sync-reconciler", "guidance-curator", "skills-curator"
+        "update", "sync-reconciler", "guidance-curator", "skills-curator", CURATION_PARENT_ROLE,
     } else ""
     if role == "retrieve":
         final_reply = "Return only the strict JSON retrieve selection required below."
@@ -83,7 +83,7 @@ def build_instructions(
     role_guidance = _role_guidance(role, curation_mode)
     command_guidance = _command_guidance(role)
     sync_guidance = _sync_guidance(role)
-    tool_guidance = _tool_guidance(role)
+    tool_guidance = _tool_guidance(role, curation_mode)
     if role == "retrieve":
         final_reply = "- Finish through the terminal retrieve-selection output type; do not return natural-language prose."
     else:
@@ -160,13 +160,13 @@ def _command_guidance(role: str) -> str:
             "read-only archaeology request over pruned memory and Git history.\n"
             "- Return historical matches as historical or pruned memory, not active memory. Do not edit memory files."
         )
-    if role in {"update", "guidance-curator", "skills-curator"}:
+    if role == CURATION_PARENT_ROLE:
+        return "- The curation task selects the scope and mode for this isolated worktree."
+    if role in DOMAIN_ROLES.values():
         return (
             "- The curation task selects Update or Maintain within this domain. Update starts from pending "
             "evidence; Maintain starts from the supplied scope and existing material.\n"
-            "- Work in the task's isolated worktree. Program completion publishes validated work and records "
-            "domain processing. Candidate evidence, claims, and receipts are program-owned; raw sources are "
-            "removed after all three domains finish."
+            "- Work in the task's isolated worktree. Candidate evidence, claims, and receipts are program-owned."
         )
     if role == "pruner":
         return (
@@ -217,7 +217,7 @@ def _sync_guidance(role: str) -> str:
     return ""
 
 
-def _tool_guidance(role: str) -> str:
+def _tool_guidance(role: str, curation_mode: str | None) -> str:
     if role == "retrieve":
         return (
             "Available retrieve tools:\n"
@@ -284,19 +284,14 @@ def _tool_guidance(role: str) -> str:
             "- `git_discard(paths)` is destructive. Use it for invalid, partial, or unsafe memory-owned "
             "changes after inspecting the diff."
         )
-    elif role in {"guidance-curator", "skills-curator"}:
+    elif role == CURATION_PARENT_ROLE:
         guidance += (
-            "\n- Write the selected domain's learning material. Existing fixed correction collections belong "
-            "to guidance curation; existing MEMORY_SKILL files belong to skills curation. Validate and commit "
-            "the allowed worktree changes before program completion."
+            "\n- Delegate through `run_curator(domain, instructions)`. Use `git_status`, `git_diff`, and file reads "
+            "to inspect the shared worktree. Use `git_add` and `git_commit` to commit approved changes."
         )
-    elif role == "update":
-        guidance += (
-            "\n- Commit tools are scoped to ordinary `MEMORY.md` and `MEMORY_*.md` context. "
-            "Fixed Agent Corrections and skill bodies belong to their domain curators. Pursuit files "
-            "and `corrections.md` are read-only; keep unrelated files out of commits."
-        )
-    else:
+        if curation_mode == "maintain":
+            guidance += "\n- Use `count_curation_tokens(domain)` to recount edited Memory, guidance, or skills."
+    elif role not in DOMAIN_ROLES.values():
         guidance += (
             "\n- Commit tools are scoped to `MEMORY.md` and `MEMORY_*.md`; keep unrelated "
             "untracked files out of memory commits unless the caller explicitly asks about them."
@@ -307,6 +302,7 @@ def _tool_guidance(role: str) -> str:
 def _role_reference_guidance(role: str) -> str:
     guidance = ""
     semantic_writers = {
+        CURATION_PARENT_ROLE,
         "pruner",
         "shared-view-builder",
         "sync-reconciler",
@@ -314,23 +310,23 @@ def _role_reference_guidance(role: str) -> str:
     }
     if role in semantic_writers:
         guidance += "\nMemory rules:\n" f"{read_reference('memory')}\n"
-    if role in {"sync-reconciler", "update"}:
+    if role in {"sync-reconciler", "update", CURATION_PARENT_ROLE}:
         guidance += (
             "\nPursuit rules:\n"
             f"{read_reference('pursuit')}\n"
         )
-    if role in {"guidance-curator", "sync-reconciler"}:
+    if role in {"guidance-curator", "sync-reconciler", CURATION_PARENT_ROLE}:
         guidance += (
             "\nBehavioral guidance rules:\n"
             f"{read_reference('guidance')}\n"
             "\nExisting Agent Correction collections:\n"
             f"{read_reference('agent-correction')}\n"
         )
-    if role in {"skills-curator", "sync-reconciler"}:
+    if role in {"skills-curator", "sync-reconciler", CURATION_PARENT_ROLE}:
         guidance += "\nWork experience and skill rules:\n" f"{read_reference('work-skills')}\n"
     if role in semantic_writers:
         guidance += "\nShared View rules:\n" f"{read_reference('shared-view')}\n"
-    if role in {"sync-reconciler", "update", "guidance-curator", "skills-curator"}:
+    if role in {"sync-reconciler", *DOMAIN_ROLES.values(), CURATION_PARENT_ROLE}:
         guidance += (
             "\nRightMemory edit-correction rules:\n"
             f"{read_reference('edit-correction')}\n"
@@ -345,7 +341,7 @@ def _role_reference_guidance(role: str) -> str:
 
 def _role_guidance(role: str, curation_mode: str | None) -> str:
     guidance = _read_prompt_file(f"prompts/{role}.md")
-    if curation_mode == "maintain" and role in DOMAIN_ROLES.values():
+    if curation_mode == "maintain" and role in {*DOMAIN_ROLES.values(), CURATION_PARENT_ROLE}:
         maintenance = _read_prompt_file("prompts/curation-maintenance.md")
         return f"{guidance.rstrip()}\n\n{maintenance}"
     return guidance
