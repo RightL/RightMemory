@@ -18,6 +18,7 @@ from .session import MemoryWriteLock, _ensure_runtime_gitignore, _fsync_director
 LEARNING_DIRECTORY = "learning"
 LEARNING_DOMAINS = ("memory", "guidance", "skills")
 DOMAIN_ROLES = {"memory": "update", "guidance": "guidance-curator", "skills": "skills-curator"}
+CURATION_SCOPES = ("all", *LEARNING_DOMAINS)
 _ID_RE = re.compile(r"[0-9a-f]{64}")
 _SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
@@ -169,7 +170,7 @@ def list_learning_candidates(
     root: Path, *, domain: str | None = None
 ) -> tuple[LearningCandidate, ...]:
     if domain is not None:
-        _require_domain(domain)
+        curation_domains(domain)
     state = _require_state(Path(root))
     return tuple(
         candidate
@@ -178,7 +179,7 @@ def list_learning_candidates(
         )
         if candidate.candidate_id not in state.withdrawn
         and not _fully_processed(state, _Receipt.from_candidate(candidate))
-        and (domain is None or candidate.candidate_id not in state.receipts[domain])
+        and (domain is None or not _processed_for(state, domain, candidate.candidate_id))
     )
 
 
@@ -194,8 +195,8 @@ def record_learning_processed(
     root = Path(root)
     state = _require_state(root)
     identifiers = _candidate_ids(candidate_ids)
-    active = state.claims.get(domain)
-    if active is not None and set(identifiers).intersection(active.candidate_ids):
+    if any(domain in curation_domains(active.domain) and set(identifiers).intersection(active.candidate_ids)
+           for active in state.claims.values()):
         raise ValueError("release the verified domain claim before recording its completion")
     prepared: list[tuple[str, _Receipt]] = []
     for candidate_id in identifiers:
@@ -240,7 +241,7 @@ def retire_processed_learning(root: Path) -> tuple[Path, ...]:
         if _fully_processed(state, _Receipt.from_candidate(candidate)) or candidate_id in state.withdrawn:
             paths.append(root / _candidate_path(candidate_id))
     for domain, identifiers in sorted(state.batches.items()):
-        if all(item in state.receipts[domain] or item in state.withdrawn for item in identifiers):
+        if all(_processed_for(state, domain, item) or item in state.withdrawn for item in identifiers):
             paths.append(root / _batch_path(domain))
     for path in paths:
         path.unlink()
@@ -272,13 +273,13 @@ def learning_claims(root: Path) -> tuple[LearningClaim, ...]:
 
 
 def learning_batch_candidate_ids(root: Path, domain: str) -> tuple[str, ...]:
-    _require_domain(domain)
+    curation_domains(domain)
     return _require_state(Path(root)).batches.get(domain, ())
 
 
 def write_learning_batch(root: Path, domain: str, candidate_ids: Iterable[str]) -> Path:
     """Record a trigger's full admitted pool in the caller's Git transaction."""
-    _require_domain(domain)
+    curation_domains(domain)
     root = Path(root)
     identifiers = _candidate_ids(candidate_ids)
     if not identifiers:
@@ -286,10 +287,10 @@ def write_learning_batch(root: Path, domain: str, candidate_ids: Iterable[str]) 
     state = _require_state(root)
     existing = state.batches.get(domain)
     if existing is not None and existing != identifiers and any(
-        item not in state.receipts[domain] and item not in state.withdrawn for item in existing
+        not _processed_for(state, domain, item) and item not in state.withdrawn for item in existing
     ):
         raise ValueError("learning domain already has an admitted batch")
-    if any(item not in state.candidates or item in state.withdrawn or item in state.receipts[domain]
+    if any(item not in state.candidates or item in state.withdrawn or _processed_for(state, domain, item)
            for item in identifiers) and existing != identifiers:
         raise ValueError("learning batch references unavailable pending evidence")
     path = _batch_path(domain)
@@ -307,7 +308,7 @@ def write_learning_claim(root: Path, claim: LearningClaim) -> Path:
     for candidate_id, evidence_hash in zip(claim.candidate_ids, claim.candidate_hashes):
         if candidate_id not in state.candidates or candidate_id in state.withdrawn:
             raise ValueError(f"claim references unavailable candidate: {candidate_id}")
-        if candidate_id in state.receipts[claim.domain]:
+        if _processed_for(state, claim.domain, candidate_id):
             raise ValueError(f"claim references already processed candidate: {candidate_id}")
         if state.candidates[candidate_id].evidence_sha256 != evidence_hash:
             raise ValueError(f"claim evidence hash does not match candidate: {candidate_id}")
@@ -495,7 +496,7 @@ def _read_state(root: Path) -> _LearningState:
             elif _is_batch_path(parts):
                 data = _parse_json(path.read_text(encoding="utf-8"))
                 _require_fields(data, {"domain", "candidate_ids"}, "learning batch")
-                _require_domain(data["domain"])
+                curation_domains(data["domain"])
                 if data["domain"] != path.stem:
                     raise ValueError("filename does not match batch domain")
                 raw_ids = data["candidate_ids"]
@@ -545,7 +546,7 @@ def _read_state(root: Path) -> _LearningState:
         for candidate_id, evidence_hash in zip(claim.candidate_ids, claim.candidate_hashes):
             if candidate_id not in state.candidates or candidate_id in state.withdrawn:
                 state.errors.append(f"learning/claims/{domain}.json: unavailable candidate {candidate_id}")
-            elif candidate_id in state.receipts[domain]:
+            elif _processed_for(state, domain, candidate_id):
                 state.errors.append(f"learning/claims/{domain}.json: candidate already processed {candidate_id}")
             elif state.candidates[candidate_id].evidence_sha256 != evidence_hash:
                 state.errors.append(f"learning/claims/{domain}.json: candidate evidence changed {candidate_id}")
@@ -556,7 +557,7 @@ def parse_learning_claim(data: object) -> LearningClaim:
     _require_fields(data, set(LearningClaim.__dataclass_fields__), "learning claim")
     assert isinstance(data, dict)
     domain = data["domain"]
-    _require_domain(domain)
+    curation_domains(domain)
     for name in ("holder", "token"):
         if not isinstance(data[name], str) or re.fullmatch(r"[0-9a-f]{32}", data[name]) is None:
             raise ValueError(f"invalid learning claim {name}")
@@ -665,6 +666,17 @@ def _identifier(value: object, label: str) -> str:
 def _require_domain(domain: str) -> None:
     if domain not in LEARNING_DOMAINS:
         raise ValueError(f"unknown learning domain: {domain}")
+
+
+def curation_domains(scope: str) -> tuple[str, ...]:
+    """Domains owned by a parent task; `all` is a scope, not a fourth domain."""
+    if scope not in CURATION_SCOPES:
+        raise ValueError(f"unknown curation domain scope: {scope}")
+    return LEARNING_DOMAINS if scope == "all" else (scope,)
+
+
+def _processed_for(state: _LearningState, domain: str, candidate_id: str) -> bool:
+    return all(candidate_id in state.receipts[item] for item in curation_domains(domain))
 
 
 def _require_candidate_id(candidate_id: str) -> None:
@@ -783,14 +795,14 @@ def _is_withdrawn_path(parts: tuple[str, ...]) -> bool:
 def _is_claim_path(parts: tuple[str, ...]) -> bool:
     return (
         len(parts) == 3 and parts[:2] == ("learning", "claims")
-        and parts[2].endswith(".json") and parts[2][:-5] in LEARNING_DOMAINS
+        and parts[2].endswith(".json") and parts[2][:-5] in CURATION_SCOPES
     )
 
 
 def _is_batch_path(parts: tuple[str, ...]) -> bool:
     return (
         len(parts) == 3 and parts[:2] == ("learning", "batches")
-        and parts[2].endswith(".json") and parts[2][:-5] in LEARNING_DOMAINS
+        and parts[2].endswith(".json") and parts[2][:-5] in CURATION_SCOPES
     )
 
 

@@ -9,6 +9,15 @@ from rightmemory.prompt import ROLE_PROMPTS, _role_reference_guidance
 class PromptReferenceSelectionTests(unittest.TestCase):
     def test_each_role_reads_only_its_package_references(self):
         expected = {
+            "curation-parent": [
+                "memory",
+                "pursuit",
+                "guidance",
+                "agent-correction",
+                "work-skills",
+                "shared-view",
+                "edit-correction",
+            ],
             "guidance-curator": ["guidance", "agent-correction", "edit-correction"],
             "historian": [],
             "insight": [],

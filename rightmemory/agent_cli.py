@@ -13,7 +13,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from .agent_cli_cleanup import AgentCliThreadCleanup, provider_thread_is_expired
 from .codex_sdk import CodexSdkRunner, CodexSdkTiming
-from .config import RUNTIME_ROLES, AgentCliConfig
+from .config import CURATION_PARENT_ROLE, RUNTIME_ROLES, AgentCliConfig
 from .platform import prepare_command
 from .prompt import build_cli_agent_instructions
 from .provider_prefixes import ProviderPrefixRecord, ProviderPrefixStore
@@ -23,6 +23,7 @@ from .provider_threads import ProviderThreadLease, ProviderThreadStore
 
 READ_ROLES = {"historian", "retrieve"}
 WRITE_ROLES = {
+    CURATION_PARENT_ROLE,
     "guidance-curator",
     "skills-curator",
     "insight",
@@ -740,21 +741,25 @@ def _turn_prompt(
     from .learning import DOMAIN_ROLES
 
     domain = next((key for key, curator_role in DOMAIN_ROLES.items() if role == curator_role), None)
-    if curation_mode == "maintain" and domain is not None:
-        from .curation_budget import domain_budget
+    if curation_mode == "maintain" and (domain is not None or role == CURATION_PARENT_ROLE):
         import shlex
 
         config_root = curation_config_root or memory_root
-        budget = domain_budget(memory_root, domain, state_root=config_root)
         command = shlex.join([
-            "rightmemory", "curate", "--root", str(memory_root), "count", "--domain", domain,
+            "rightmemory", "curate", "--root", str(memory_root), "count", "--domain", domain or "DOMAIN",
             "--config-root", str(config_root),
         ])
-        instructions += (
-            f"\n\nRetained-text budget for {domain}: {budget['retained_text_tokens']:,} of "
-            f"{budget['token_limit']:,} {budget['encoding']} tokens. "
-            f"Recount edited state with {command}."
-        )
+        if domain is None:
+            instructions += f"\n\nRecount edited state with `{command}`, using memory, guidance, or skills for DOMAIN."
+        else:
+            from .curation_budget import domain_budget
+
+            budget = domain_budget(memory_root, domain, state_root=config_root)
+            instructions += (
+                f"\n\nRetained-text budget for {domain}: {budget['retained_text_tokens']:,} of "
+                f"{budget['token_limit']:,} {budget['encoding']} tokens. "
+                f"Recount edited state with {command}."
+            )
     return f"{instructions}\n\n{caller}"
 
 

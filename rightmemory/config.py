@@ -22,7 +22,8 @@ ROLES = {
     "sync-reconciler",
 }
 CURATOR_ROLES = {"guidance-curator", "skills-curator"}
-RUNTIME_ROLES = ROLES | CURATOR_ROLES | {"update"}
+CURATION_PARENT_ROLE = "curation-parent"
+RUNTIME_ROLES = ROLES | CURATOR_ROLES | {"update", CURATION_PARENT_ROLE}
 MODEL_FALLBACK_ROLES = (
     "update",
     "insight",

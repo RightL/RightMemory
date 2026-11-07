@@ -5,7 +5,7 @@ description: "Use when the user chooses automatic RightMemory use during ordinar
 
 # Use RightMemory Automatically
 
-Help this conversation benefit from prior context and leave useful evidence for later work. One daily entry serves ordinary Memory, agent guidance, and reusable work experience; their curators decide what to retain and how to generalize it. Pursuit remains the user's read-only direction map during ordinary work.
+Help this conversation benefit from prior context and leave useful evidence for later work. One daily entry serves ordinary Memory, agent guidance, and reusable work experience. A curation parent reviews the three domains' judgments together. Pursuit remains the user's read-only direction map during ordinary work.
 
 Use one stable session id throughout the conversation. Use the root selected by the user's task or profile; `rightmemory status` reports it when an explicit root is needed.
 
@@ -31,7 +31,7 @@ Use the same submission path for user and people context, project understanding,
 rightmemory submit --root <active-root> --session <session-id> --request-id <submission-id> --file <evidence-file> --executor configured
 ```
 
-An inline text argument can replace `--file`. Reuse the request id and identical evidence when retrying the same submission. An explicit request to remember something uses this path too. The three curators draw their own useful conclusions from shared evidence; the submitting agent need not choose its final destination.
+An inline text argument can replace `--file`. Reuse the request id and identical evidence when retrying the same submission. An explicit request to remember something uses this path too. The domains may draw different useful conclusions from shared evidence. Leave the final destination to curation.
 
 Describe what mattered: for a redirection, the prior approach, user signal, and resulting direction; for work experience, the method, human contributions, outcome, and resources that could spare later rediscovery. Consider whether the situation or a submethod may recur and whether the evidence would help a later agent reproduce a meaningful result from a short prompt. Preserve actual evidence without inventing final wording, a general rule, or a skill.
 
@@ -39,8 +39,8 @@ Submit at a natural boundary once the evidence is concrete enough to describe; c
 
 ## Curation and Maintenance
 
-Submission wakes the configured curation worker. Continue the user's work while it processes bounded batches for Memory, guidance, and skills. Pending evidence is retrievable immediately. Once all three domains finish, the program removes the raw candidate; curators retain useful context, cases, or experiences in their own sources.
+Submission wakes the configured curation worker. Continue the user's work while each parent task processes a bounded batch across Memory, guidance, and skills in one shared worktree. Pending evidence is retrievable immediately. One parent completion publishes the reviewed result and retires fully processed raw candidates. Useful context, cases, and experiences remain in curated sources.
 
 Use `rightmemory curate --root <active-root> status` when a result is uncertain or work needs recovery. Follow the returned task controls; do not start a duplicate worker for an active task. A saved candidate confirms capture, and a completion receipt confirms publication. Neither by itself proves that future behavior has improved.
 
-Explicit broader maintenance uses `maintain-rightmemory`, `maintain-agent-guidance`, or `maintain-work-skills`. Each prepares the same curator in Maintain mode for the user's scope. Ordinary learning does not require a manual review of every candidate.
+Use `maintain-rightmemory-system` for requested maintenance across domains. Use `maintain-rightmemory`, `maintain-agent-guidance`, or `maintain-work-skills` for a single domain. Each prepares a parent task in Maintain mode for the user's scope. Ordinary learning does not require a manual review of every candidate.

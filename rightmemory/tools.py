@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 
+from .config import CURATION_PARENT_ROLE
 from .corrections import (
     CORRECTION_COLLECTION_MAX_ENTRIES,
     validate_agent_correction_markdown,
@@ -65,8 +66,9 @@ PRUNE_SUBJECT_PREFIX = "prune:"
 UPDATE_WRITE_ROLES = {"update"}
 PURSUIT_MAP_WRITE_ROLES = {"pursuit-map"}
 CURATOR_DOMAINS = {"guidance-curator": "guidance", "skills-curator": "skills"}
-CORRECTIONS_READ_ROLES = {"update", "sync-reconciler", *CURATOR_DOMAINS}
-LEARNING_READ_ROLES = {"retrieve", "update", "sync-reconciler", *CURATOR_DOMAINS}
+CURATOR_READ_ROLES = {*CURATOR_DOMAINS, CURATION_PARENT_ROLE}
+CORRECTIONS_READ_ROLES = {"update", "sync-reconciler", *CURATOR_READ_ROLES}
+LEARNING_READ_ROLES = {"retrieve", *CORRECTIONS_READ_ROLES}
 INSIGHT_ROLES = {"insight"}
 RETRIEVE_ROLES = {"retrieve"}
 SYNC_RECONCILER_ROLES = {"sync-reconciler"}
@@ -1433,6 +1435,8 @@ class MemoryTools:
         raise ValueError(f"can only stage, commit, or discard {self._write_policy_label()}: {relative_path}")
 
     def _write_policy_label(self) -> str:
+        if self.role == CURATION_PARENT_ROLE:
+            return "curated Memory, guidance, or work skills content"
         if self.role in CURATOR_DOMAINS:
             return f"{CURATOR_DOMAINS[self.role]} learning content within the selected domain"
         if self.role in INSIGHT_ROLES:
@@ -1453,6 +1457,10 @@ class MemoryTools:
     def _is_allowed_write_path(self, relative_path: str) -> bool:
         if is_learning_state_path(relative_path):
             return False
+        if self.role == CURATION_PARENT_ROLE:
+            return self._is_active_memory_path(relative_path) or any(
+                learning_write_path(domain, relative_path) for domain in CURATOR_DOMAINS.values()
+            )
         if relative_path in FIXED_CORRECTION_COLLECTION_PATHS:
             return self.role in {"guidance-curator", *SYNC_RECONCILER_ROLES}
         if self.role in CURATOR_DOMAINS:
@@ -1513,10 +1521,10 @@ class MemoryTools:
         raise ValueError(f"can only read {self._read_policy_label()}: {relative_path}")
 
     def _has_role_read_scope(self) -> bool:
-        return self.role in INSIGHT_ROLES | RETRIEVE_ROLES | CURATOR_DOMAINS.keys()
+        return self.role in INSIGHT_ROLES | RETRIEVE_ROLES | CURATOR_READ_ROLES
 
     def _read_policy_label(self) -> str:
-        if self.role == "retrieve" or self.role in CURATOR_DOMAINS:
+        if self.role == "retrieve" or self.role in CURATOR_READ_ROLES:
             return "RightMemory context and independent learning sources"
         return "MEMORY.md, MEMORY_*.md, or insight_logs/*.md"
 
@@ -1537,7 +1545,7 @@ class MemoryTools:
             return False
         if not self._has_role_read_scope():
             return True
-        if self.role == "retrieve" or self.role in CURATOR_DOMAINS:
+        if self.role == "retrieve" or self.role in CURATOR_READ_ROLES:
             return self._is_active_rightmemory_path(relative_path) or (
                 is_learning_path(relative_path)
                 and (not is_learning_state_path(relative_path) or self._is_learning_candidate_path(relative_path))
@@ -1591,7 +1599,7 @@ class MemoryTools:
         return sorted(set(paths))
 
     def _role_read_patterns(self) -> tuple[str, ...]:
-        if self.role in CURATOR_DOMAINS:
+        if self.role in CURATOR_READ_ROLES:
             return (*RETRIEVE_READ_PATHS, CORRECTIONS_PATH)
         return RETRIEVE_READ_PATHS if self.role == "retrieve" else INSIGHT_READ_PATHS
 

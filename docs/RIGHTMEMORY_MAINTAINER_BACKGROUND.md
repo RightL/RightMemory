@@ -4,7 +4,7 @@ This document gives fresh agents the context needed to review or modify RightMem
 
 ## Purpose
 
-RightMemory should help later agents understand the user and other people, collaborate with fewer repeated corrections, and repeat meaningful work with less human direction. One daily entry uses three domain curators:
+RightMemory should help later agents understand the user and other people, collaborate with fewer repeated corrections, and repeat meaningful work with less human direction. One daily entry captures shared evidence for three domains.
 
 | Domain | Shared core | Curated state |
 |---|---|---|
@@ -18,11 +18,11 @@ Pursuit remains the user's hierarchical direction map. Ordinary learning does no
 
 ## Evidence and Curation
 
-All evidence uses one submission path. Memory, guidance, and skills can draw different useful conclusions from the same interaction and record processing independently. The main agent preserves evidence; it need not predict the final domain or wording.
+All evidence uses one submission path. The main agent preserves evidence and leaves the final domain and wording to curation. Memory, guidance, and skills can draw different useful conclusions from the same interaction.
 
-Capture concrete potentially useful evidence before demanding a settled general rule. Preserve the circumstances, user's contribution, observed outcome, and uncertainty needed to interpret it. Formal curation makes a separate judgment about usefulness, recurrence, scope, and strength of evidence. Pending candidates are retrievable before curation. After all three domains finish, the program removes the raw source. Each curator preserves independently useful context, cases, or experience in its owned state before completing the task.
+Capture concrete potentially useful evidence before demanding a settled general rule. Preserve the circumstances, user's contribution, observed outcome, and uncertainty needed to interpret it. Formal curation makes a separate judgment about usefulness, recurrence, scope, and strength of evidence. Pending candidates are retrievable before curation. Update sends one batch to all three domain agents in a shared worktree. The parent reviews their combined result and owns the commit. One parent completion publishes the result, records processing for each domain, and retires fully processed raw candidates.
 
-Requested maintenance starts from existing scoped material and uses the same task preparation, domain core, and publication controls as Update. It leaves pending evidence and processing records to the program. No per-candidate human approval queue is required. The user's current direction remains authoritative over an old or overbroad interpretation.
+Requested maintenance starts from existing scoped material across all three domains or within a single domain. It uses the same parent and domain cores and publication controls as Update. Pending evidence stays available for Update, and the program owns processing records. No per-candidate human approval queue is required. The user's current direction remains authoritative over an old or overbroad interpretation.
 
 ## Readers and Responsibilities
 
@@ -34,9 +34,10 @@ Requested maintenance starts from existing scoped material and uses the same tas
 | `RIGHTMEMORY_EDIT_CORRECTION_RULES.md` | Curators and maintainers | Operational feedback on RightMemory edits |
 | `retrieve.md`, `assistant-retrieve.md` | Retrieval agents | Relevance judgment and source inspection |
 | `RETRIEVE_CONTRACT.md` | Runtime and internal retrieval agents | Selection and delivery mechanics |
+| `curation-parent.md` | Curation parent | Review of the combined result |
 | `update.md`, `guidance-curator.md`, `skills-curator.md` | Domain agents | Bounded execution procedure |
 | Daily entry skills and MCP instructions | The main working agent | Retrieval, shared evidence submission, and native task delegation |
-| `maintain-rightmemory`, `maintain-agent-guidance`, `maintain-work-skills` | Requested domain maintainer | Broader maintenance within the user's scope |
+| `maintain-rightmemory-system`, `maintain-rightmemory`, `maintain-agent-guidance`, `maintain-work-skills` | Requested maintainer | Cross-domain or single-domain maintenance within the user's scope |
 | `learning.py` and execution adapters | Runtime | Durable evidence, per-domain receipts, isolation, validation, and publication |
 
 One concept should have one normative owner. Other files refer to it rather than restating the full definition. Program-managed evidence and state transitions are enforced by code, not recreated as instructions for every agent.

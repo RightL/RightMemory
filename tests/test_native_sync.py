@@ -82,7 +82,7 @@ class NativeSyncTests(SyncTestBase):
         head = self._git(self.device, "rev-parse", "HEAD")
         self.assertEqual(head, receipt["landed_commit"])
         self.assertEqual(self._git(self.remote, "rev-parse", "main"), head)
-        memory = (self.device / "MEMORY.md").read_text()
+        memory = (self.device / "MEMORY.md").read_text(encoding="utf-8")
         self.assertIn("local durable fact", memory)
         self.assertIn("remote durable fact", memory)
         again = NativeSyncRepair(self.device).complete(task["task_id"])
@@ -317,12 +317,12 @@ class NativeSyncTests(SyncTestBase):
 
         output = io.StringIO()
         with redirect_stdout(output):
-            code = main(["--root", str(self.device), "begin", "--domain", "memory"])
+            code = main(["--root", str(self.device), "begin"])
         result = json.loads(output.getvalue())
         self.assertEqual(code, 1)
         self.assertEqual(result["sync"]["status"], "conflict")
         self.assertEqual(result["sync_repair"]["status"], "required")
-        result = call(create_mcp_server(self.device), "rightmemory_begin_curation", {"domain": "memory"})
+        result = call(create_mcp_server(self.device), "rightmemory_begin_curation", {})
         self.assertTrue(result.is_error)
         self.assertEqual(result.structured_content["sync_repair"]["status"], "required")
         self.assertEqual(self._git(self.device, "rev-parse", "HEAD"), self.start)

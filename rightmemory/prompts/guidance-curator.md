@@ -8,4 +8,4 @@ For an update, consider related candidates together and compare them with releva
 
 Form a tentative judgment before consulting relevant RightMemory Edit Feedback in root `corrections.md`. For updates, make the smallest coherent change that leaves the affected guidance useful as a whole. Leave unrelated state and other domains unchanged. Candidate evidence, claims, and processing receipts are program-owned.
 
-Validate the result and commit allowed changes as directed by the task. Report the changed guidance or cases, evidence left without a durable change, and material uncertainty. A no-change judgment is a valid result; the program records publication and, for updates, processing of the supplied candidates.
+Edit the assigned files in the parent's candidate worktree. Report the changed guidance or cases, evidence left without a durable change, and material uncertainty. A no-change judgment is a valid result. The parent reviews the combined result and owns validation, Git staging, commits, and publication, so related changes across domains are considered together before becoming live.

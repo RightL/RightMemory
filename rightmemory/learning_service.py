@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, replace
@@ -17,9 +18,12 @@ from .config import load_sync_config
 from .curation_batch import select_curation_batch
 from .curation_budget import domain_budget
 from .isolated_write import WorktreeLease
+from .isolated_write import IsolatedWriteSupervisor
+from .git_storage import git
 from .learning import (
     DOMAIN_ROLES, LEARNING_DOMAINS, LearningCandidate, LearningClaim, learning_claims,
     learning_batch_candidate_ids, list_learning_candidates, parse_learning_claim, submit_learning,
+    CURATION_SCOPES, curation_domains,
 )
 from .learning_coordinator import (
     LearningClaimLost, LearningCoordinator, LearningSemanticBaseChanged,
@@ -67,7 +71,7 @@ class LearningService:
         source = self.memory_root
         if task_id is not None:
             record = self._task(task_id)
-            if record["domain"] != domain:
+            if domain not in curation_domains(record["domain"]):
                 raise ValueError("curator task belongs to a different domain")
             writer = self._writer(domain)
             task = writer.read(task_id)
@@ -79,13 +83,15 @@ class LearningService:
         }
 
     def begin(
-        self, domain: str, *, mode: str = "update", scope: str = "", retry_task: str | None = None,
+        self, domain: str = "all", *, mode: str = "update", scope: str = "", retry_task: str | None = None,
         _executor: str = "native",
     ) -> dict[str, Any]:
-        _validate_domain(domain)
+        curation_domains(domain)
         _validate_executor(_executor)
         if mode not in {"update", "maintain"}:
             raise ValueError("curation mode must be update or maintain")
+        if mode == "update" and domain != "all" and retry_task is None:
+            raise ValueError("Update is coordinated across all domains; use --domain all")
         if not isinstance(scope, str):
             raise ValueError("curation scope must be text")
         with self._locked():
@@ -115,6 +121,8 @@ class LearningService:
                         raise LearningClaimLost("only the current curator task can be retried")
                     if requested["executor"] == "configured" and self._lease(requested).is_live():
                         raise RuntimeError("stop the configured curator worker before replacing its task")
+                    if any(self._child_lease(requested, item).is_live() for item in requested["children"]):
+                        raise RuntimeError("stop running domain workers before replacing their parent task")
                     mode, scope = requested["input"]["mode"], requested["input"]["scope"]
                     _executor = requested["executor"]
                     retry_input = requested["input"]
@@ -131,7 +139,7 @@ class LearningService:
                     active = None
                 elif retry_task is None:
                     prepared = self._prepare(active, claimed=False)
-                    return self._requested_result(prepared, mode, scope)
+                    return self._requested_result(prepared, mode, scope, domain)
                 elif (operation := self._operation(active)) is not None and operation.phase == "prepared":
                     # Recover an uncertain publication before abandoning semantic work.
                     try:
@@ -144,6 +152,7 @@ class LearningService:
                 "task_id": task_id, "domain": domain, "status": "claiming",
                 "executor": _executor, "claim": None,
                 "input": retry_input or {"domain": domain, "mode": mode, "scope": scope, "candidates": []},
+                "children": {item: {"status": "pending"} for item in curation_domains(domain)},
             }
             # Persist executor ownership before a remote claim can succeed.
             self._save_task(planned)
@@ -161,7 +170,7 @@ class LearningService:
                 if claim is None:
                     return self._response({"status": "not_ready", "domain": domain, "reason": claimed.reason})
                 return self._response({
-                    "status": "active", "domain": domain, "task_id": claim.task_id,
+                    "status": "active", "domain": claim.domain, "task_id": claim.task_id,
                     "mode": claim.mode, "scope": claim.scope, "claimed": False,
                     "foreign": True, "executor": None, "reason": claimed.reason,
                 })
@@ -178,13 +187,13 @@ class LearningService:
                     raise ValueError("claimed task no longer matches its frozen input")
             record.update(status="running", claim=asdict(claim), input=data)
             self._save_task(record)
-            self._write(self.root / f"{domain}-active.json", {"task_id": claim.task_id})
+            self._write(self.root / "active.json", {"task_id": claim.task_id})
             if active is not None and active["task_id"] != claim.task_id:
                 active["status"] = "superseded"
                 active["replacement_task"] = claim.task_id
                 self._save_task(active)
             prepared = self._prepare(record, claimed=claimed.claimed)
-            return self._requested_result(prepared, mode, scope)
+            return self._requested_result(prepared, mode, scope, domain)
 
     def complete(self, task_id: str, output: str = "") -> dict[str, Any]:
         with self._locked():
@@ -228,6 +237,7 @@ class LearningService:
                 "selected_candidate_count": len(record["input"]["candidates"]),
                 "operation_phase": None if operation is None else operation.phase,
                 "replacement_task": record.get("replacement_task"),
+                "children": record["children"],
                 "begin_argv": self._task_argv("begin", record),
                 "complete_argv": self._argv("complete", "--task", task_id),
                 "retry_argv": self._argv("begin", "--domain", record["domain"], "--retry", task_id),
@@ -238,7 +248,15 @@ class LearningService:
         result = []
         shared = {claim.domain: claim for claim in learning_claims(self.memory_root)}
         holder = self.coordinator.holder_id
-        for domain in LEARNING_DOMAINS:
+        active_parent = self._active("all")
+        if (
+            active_parent is not None
+            and shared.get(active_parent["domain"]) != self._claim(active_parent)
+            and not self._is_finalized(active_parent)
+        ):
+            active_parent = None
+        domain = active_parent["domain"] if active_parent is not None else next(iter(shared), "all")
+        for domain in (domain,):
             claim = shared.get(domain)
             active = self._active(domain)
             pending = list_learning_candidates(self.memory_root, domain=domain)
@@ -297,9 +315,11 @@ class LearningService:
                 })
         return result
 
-    def run(self, domain: str, *, mode: str = "update", scope: str = "") -> dict[str, Any]:
-        """Run one shared task with the configured domain executor."""
-        _validate_domain(domain)
+    def run(self, domain: str = "all", *, mode: str = "update", scope: str = "") -> dict[str, Any]:
+        """Run the parent over one shared candidate, then publish its reviewed result."""
+        curation_domains(domain)
+        if mode == "update" and domain != "all":
+            raise ValueError("Update is coordinated across all domains; use --domain all")
         active = self._active(domain)
         if active is not None and self._is_finalized(active):
             # Finish a recovered publication as this call's task. The worker must
@@ -331,14 +351,17 @@ class LearningService:
             task = writer.read(task_id)
             if task.source_commit is not None:
                 return self.complete(task_id)
-            config = load_config(DOMAIN_ROLES[domain], memory_root=self.memory_root)
+            config = load_config("curation-parent", memory_root=self.memory_root)
             config = replace(
                 config, memory_root=task.worktree, state_root=self.memory_root,
                 fresh_provider_session=True, sync=replace(config.sync, enabled=False),
             )
-            runtime = RightMemoryRuntime(config, curation_mode=task.input_data["mode"])
+            runtime = RightMemoryRuntime(config, curation_mode=task.input_data["mode"], curation_task_id=task_id)
             try:
-                output = runtime.run_session_turn(task_id, _curation_input(task.input_data))
+                caller = self._parent_input(record)
+                if task.input_data["mode"] == "maintain":
+                    caller += "\n\nMaintenance budgets by domain:\n" + json.dumps(prepared["token_budgets"], ensure_ascii=False)
+                output = runtime.run_session_turn(task_id, caller)
             finally:
                 runtime.cleanup()
             return self.complete(task_id, output)
@@ -348,6 +371,194 @@ class LearningService:
             return {**replacement, "status": "retry_ready", "reason": str(exc)}
         finally:
             lease.release()
+
+    def begin_child(
+        self, task_id: str, domain: str, *, instructions: str = "", retry: bool = False,
+        _executor: str = "native",
+    ) -> dict[str, Any]:
+        """Prepare a domain contribution in its parent's existing worktree."""
+        from .prompt import build_cli_agent_instructions
+
+        _validate_domain(domain)
+        _validate_executor(_executor)
+        if not isinstance(instructions, str):
+            raise ValueError("domain instructions must be text")
+        with self._locked():
+            record = self._task(task_id)
+            self._check_current(record)
+            if domain not in record["children"]:
+                raise ValueError("domain is outside the parent task's requested scope")
+            task = self._writer(record["domain"]).read(task_id)
+            self._writer(record["domain"])._verify_worktree(task)
+            if task.source_commit is not None:
+                raise RuntimeError("parent publication has already been prepared")
+            child = record["children"][domain]
+            if child["status"] == "running" and not retry:
+                return self._child_result(record, domain)
+            if self._child_lease(record, domain).is_live():
+                raise RuntimeError("the domain worker is still running")
+            attempt = uuid.uuid4().hex
+            child = {
+                "status": "running", "attempt": attempt, "executor": _executor,
+                "head": git(task.worktree, "rev-parse", "HEAD"),
+                "index": git(task.worktree, "write-tree"), "instructions": instructions,
+            }
+            record["children"][domain] = child
+            self._save_task(record)
+            data = {**record["input"], "domain": domain}
+            text = build_cli_agent_instructions(task.worktree, DOMAIN_ROLES[domain], curation_mode=data["mode"])
+            text += f"\n\n{_curation_input(data)}\n\n{instructions}\n"
+            text += (
+                "\nYou contribute to a parent-managed task in a shared candidate worktree. "
+                "Edit your domain's files and return your findings to the parent. "
+                "Other domain agents may be editing their own files; preserve their work. "
+                "The parent owns combined review, Git staging/commits and publication. "
+                "Do not stage, commit, reset, switch branches, or run curation completion. "
+                "Report material omissions, uncertainty and changes another domain needs.\n"
+            )
+            if data["mode"] == "maintain":
+                text += "\nMaintenance budget:\n" + json.dumps(
+                    domain_budget(task.worktree, domain, state_root=self.memory_root), ensure_ascii=False,
+                )
+                text += "\nCount with: " + shlex.join(self._argv("count", "--task", task_id, "--domain", domain))
+            directory = self.root / "tasks" / task_id
+            path = directory / f"{domain}.md"
+            self._check_path(path)
+            path.write_text(text, encoding="utf-8")
+            return self._child_result(record, domain)
+
+    def complete_child(
+        self, task_id: str, domain: str, attempt: str, output: str = "", *,
+        _lease: WorktreeLease | None = None,
+    ) -> dict[str, Any]:
+        """Record a returned contribution; do not publish or consume evidence."""
+        _validate_domain(domain)
+        if not isinstance(output, str):
+            raise ValueError("domain output must be text")
+        with self._locked():
+            record = self._task(task_id)
+            self._check_current(record)
+            child = record["children"].get(domain)
+            if child is None or child.get("attempt") != attempt:
+                raise LearningClaimLost("domain contribution belongs to a replaced attempt")
+            if child["status"] == "completed":
+                if output != child["output"]:
+                    raise ValueError("domain attempt already completed with different output")
+                return self._child_result(record, domain)
+            if child["status"] != "running":
+                raise RuntimeError("domain attempt is not running")
+            current_lease = self._child_lease(record, domain)
+            if current_lease.is_live() and not (
+                _lease is not None and _lease._owned and _lease.path == current_lease.path
+            ):
+                raise RuntimeError("wait for the configured domain worker to return before completing it")
+            task = self._writer(record["domain"]).read(task_id)
+            if git(task.worktree, "rev-parse", "HEAD") != child["head"] or git(task.worktree, "write-tree") != child["index"]:
+                child.update(status="failed", error="domain work changed shared Git history or staging")
+                self._save_task(record)
+                raise RuntimeError(child["error"])
+            child.update(status="completed", output=output)
+            self._save_task(record)
+            return self._child_result(record, domain)
+
+    def run_child(self, task_id: str, domain: str, *, instructions: str = "") -> dict[str, Any]:
+        """Run one configured domain model without finalizing its parent's work."""
+        # Serialize configured child executions through their full before/after
+        # scope check, not merely the model turn. Native delegation can use the
+        # host's parallel agents; the parent is responsible for their boundaries.
+        with self._child_execution_locked():
+            return self._run_child(task_id, domain, instructions=instructions)
+
+    def _run_child(self, task_id: str, domain: str, *, instructions: str = "") -> dict[str, Any]:
+        from .config import load_config
+        from .runtime import RightMemoryRuntime
+
+        prepared = self.begin_child(task_id, domain, instructions=instructions, _executor="configured", retry=True)
+        attempt = prepared["attempt"]
+        with self._locked():
+            record = self._task(task_id)
+            self._check_current(record)
+            child = record["children"][domain]
+            if child.get("attempt") != attempt:
+                raise LearningClaimLost("domain contribution was replaced before execution")
+            lease = self._child_lease(record, domain)
+            lease.acquire()
+        worktree = Path(prepared["worktree"])
+        try:
+            before = _workspace_files(worktree)
+            config = load_config(DOMAIN_ROLES[domain], memory_root=self.memory_root)
+            config = replace(config, memory_root=worktree, state_root=self.memory_root,
+                             fresh_provider_session=True, sync=replace(config.sync, enabled=False))
+            runtime = RightMemoryRuntime(config, curation_mode=record["input"]["mode"], curation_task_id=task_id)
+            try:
+                output = runtime.run_session_turn(f"{task_id}-{domain}-{attempt}", Path(prepared["instructions_file"]).read_text(encoding="utf-8"))
+            finally:
+                runtime.cleanup()
+            after = _workspace_files(worktree)
+            owner = IsolatedWriteSupervisor(worktree, DOMAIN_ROLES[domain])
+            changed = [path for path in before.keys() | after.keys() if before.get(path) != after.get(path)]
+            # Configured calls share a worktree, so run them serially through the
+            # runtime write lock. Native parallel workers use the same ownership
+            # instructions; final publication always validates the combined scope.
+            invalid = [path for path in changed if not owner._is_role_write_path(path)]
+            if invalid:
+                raise ValueError("domain worker changed files outside its ownership: " + ", ".join(sorted(invalid)))
+            return self.complete_child(task_id, domain, attempt, output, _lease=lease)
+        except BaseException as exc:
+            with self._locked():
+                latest = self._task(task_id)
+                if latest["children"][domain].get("attempt") == attempt:
+                    latest["children"][domain].update(status="failed", error=str(exc))
+                    self._save_task(latest)
+            raise
+        finally:
+            lease.release()
+
+    def _child_lease(self, record: dict, domain: str) -> WorktreeLease:
+        return WorktreeLease(self.memory_root, DOMAIN_ROLES[domain], record["task_id"])
+
+    @contextmanager
+    def _child_execution_locked(self):
+        path = self.root / "child-execution.lock"
+        self._check_path(path)
+        _ensure_durable_directory(path.parent)
+        with path.open("a+b") as handle:
+            lock_file(handle)
+            try:
+                yield
+            finally:
+                unlock_file(handle)
+
+    def _child_result(self, record: dict, domain: str) -> dict[str, Any]:
+        child = record["children"][domain]
+        task = self._writer(record["domain"]).read(record["task_id"])
+        result = {
+            "task_id": record["task_id"], "domain": domain, **child,
+            "worktree": str(task.worktree),
+            "instructions_file": str(self.root / "tasks" / record["task_id"] / f"{domain}.md"),
+        }
+        if child.get("attempt"):
+            result["complete_argv"] = self._argv("worker-complete", "--task", record["task_id"],
+                                                  "--domain", domain, "--attempt", child["attempt"])
+        return result
+
+    def _parent_input(self, record: dict) -> str:
+        task_id = record["task_id"]
+        result = _curation_input(record["input"])
+        result += "\n\nParent task: " + task_id + "\nDomain contributions:\n"
+        result += json.dumps(record["children"], ensure_ascii=False, indent=2)
+        result += (
+            "\nFor configured domain work, use run_curator(domain, instructions), or the CLI commands below. "
+            "For native delegation, worker-begin returns the shared worktree and domain instructions. "
+            "After that agent returns, record its result with the returned worker-complete command. "
+            "Each selected domain contributes before parent completion. You can request further revisions "
+            "with another domain invocation, or finish edits yourself after workers have returned.\n"
+        )
+        for domain in curation_domains(record["domain"]):
+            for action in ("worker-begin", "worker-run"):
+                result += shlex.join(self._argv(action, "--task", task_id, "--domain", domain)) + "\n"
+        result += "\nReview the finished files and their diff before staging and committing the combined result."
+        return result
 
     def _prepare(self, record: dict, *, claimed: bool) -> dict[str, Any]:
         from .prompt import build_cli_agent_instructions
@@ -362,27 +573,26 @@ class LearningService:
         candidates_file = directory / "candidates.json"
         instructions_file = directory / "instructions.md"
         self._write(candidates_file, data)
-        canonical = build_cli_agent_instructions(task.worktree, DOMAIN_ROLES[domain], curation_mode=mode)
+        canonical = build_cli_agent_instructions(task.worktree, "curation-parent", curation_mode=mode)
         budget_context = ""
         budget_info = {}
         if mode == "maintain":
-            budget = domain_budget(task.worktree, domain, state_root=self.memory_root)
-            count_argv = self._argv("count", "--domain", domain, "--task", task.task_id)
-            budget_context = (
-                f"Retained text uses {budget['retained_text_tokens']} of {budget['token_limit']} tokens. "
-                f"Recount the edited worktree with `{shlex.join(count_argv)}`.\n\n"
-            )
-            budget_info = {"token_budget": budget, "count_argv": count_argv}
+            budgets = {item: domain_budget(task.worktree, item, state_root=self.memory_root)
+                       for item in curation_domains(domain)}
+            budget_context = "Maintenance budgets by domain:\n" + json.dumps(budgets, ensure_ascii=False) + "\n"
+            budget_info = {"token_budgets": budgets}
         complete = self._argv("complete", "--task", task.task_id)
         status = self._argv("status", "--task", task.task_id)
         instructions = (
-            f"{canonical}\n\n{_curation_input(data)}\n\n{budget_context}"
-            f"Native task {task.task_id}: edit and commit only allowed files in {task.worktree}. "
+            f"{canonical}\n\n{self._parent_input(record)}\n\n{budget_context}"
+            f"Native parent task {task.task_id}: own the combined edits in {task.worktree}. "
             f"Read the frozen candidate manifest from {candidates_file}. "
             "Source_file paths are relative to the candidate worktree; read their decoded evidence "
             "with native file tools. "
             f"Validate using {shlex.join(['rightmemory', 'validate', '--root', str(task.worktree)])}. "
             "Candidate evidence, claims, and processing receipts belong to program finalization.\n"
+            "After the domain agents return, review the combined result and handle any revisions. "
+            "You own staging and committing the reviewed files; domain agents do not use Git writes. "
             f"After the candidate worktree is clean, run {shlex.join(complete)} even for no change. "
             "Only its receipt confirms publication; successful completion removes the worktree. "
             f"If interrupted, use {shlex.join(status)} and retry completion with the same task id. "
@@ -397,6 +607,7 @@ class LearningService:
             "selected_candidate_count": len(data["candidates"]),
             "worktree": str(task.worktree), "instructions_file": str(instructions_file),
             "candidates_file": str(candidates_file), "complete_argv": complete, "status_argv": status,
+            "children": record["children"],
             **budget_info,
         }
 
@@ -410,6 +621,10 @@ class LearningService:
         landed = self.coordinator.finalized_commit(claim)
         if landed is None:
             self._check_current(record)
+            unfinished = [domain for domain, child in record["children"].items()
+                          if child["status"] != "completed" or self._child_lease(record, domain).is_live()]
+            if unfinished:
+                raise RuntimeError("parent review requires completed domain work: " + ", ".join(unfinished))
             prepared = writer.complete(
                 record["task_id"], output=output, external_finalizer=finalizer,
                 check_current=lambda: self._check_current(record),
@@ -433,11 +648,11 @@ class LearningService:
         record["receipt"] = receipt
         self._save_task(record)
         if self._active_id(record["domain"]) == record["task_id"]:
-            self._write(self.root / f"{record['domain']}-active.json", {"task_id": None})
+            self._write(self.root / "active.json", {"task_id": None})
         try:
             writer.cleanup(record["task_id"])
             directory = self.root / "tasks" / record["task_id"]
-            for name in ("candidates.json", "instructions.md"):
+            for name in ("candidates.json", "instructions.md", *(f"{domain}.md" for domain in curation_domains(record["domain"]))):
                 path = directory / name
                 self._check_path(path)
                 path.unlink(missing_ok=True)
@@ -450,7 +665,7 @@ class LearningService:
 
     def _retry_effects(self, record: dict) -> dict:
         receipt = record["receipt"]
-        if record["domain"] == "memory":
+        if "memory" in curation_domains(record["domain"]):
             try:
                 receipt["effects"] = replay_memory_operation_effects(self.memory_root, receipt["operation_id"])
             except (OSError, ValueError, RuntimeError) as exc:
@@ -461,13 +676,13 @@ class LearningService:
         return receipt
 
     def _pending_effect_task(self, domain: str) -> dict | None:
-        if domain != "memory":
+        if "memory" not in curation_domains(domain):
             return None
         store = SemanticOperationStore(self.memory_root)
         outstanding = [
             record for record in store.list_outstanding_records(read_only=True)
             if record.phase in FINAL_PHASES and record.input_data.get("kind") == "curation"
-            and record.input_data.get("role") == "update" and any(effect.status != "done" for effect in record.effects)
+            and record.input_data.get("role") == "curation-parent" and any(effect.status != "done" for effect in record.effects)
         ]
         outstanding.sort(key=lambda record: (record.outcome.sequence, record.operation_id))
         for operation in outstanding:
@@ -486,14 +701,14 @@ class LearningService:
         record["replacement_task"] = None if current is None else current.task_id
         self._save_task(record)
         if self._active_id(record["domain"]) == record["task_id"]:
-            self._write(self.root / f"{record['domain']}-active.json", {"task_id": None})
+            self._write(self.root / "active.json", {"task_id": None})
         return True
 
     def _writer(self, domain: str) -> AssistantWriteManager:
-        return AssistantWriteManager(self.memory_root, role=DOMAIN_ROLES[domain])
+        return AssistantWriteManager(self.memory_root, role="curation-parent")
 
     def _lease(self, record: dict) -> WorktreeLease:
-        return WorktreeLease(self.memory_root, DOMAIN_ROLES[record["domain"]], record["task_id"])
+        return WorktreeLease(self.memory_root, "curation-parent", record["task_id"])
 
     def _operation(self, record: dict):
         try:
@@ -527,7 +742,7 @@ class LearningService:
             raise LearningClaimLost("curator shared claim was replaced or completed")
 
     def _active_id(self, domain: str) -> str | None:
-        record = self._read(self.root / f"{domain}-active.json")
+        record = self._read(self.root / "active.json")
         if record is not None and set(record) != {"task_id"}:
             raise ValueError("invalid active curator task state")
         return None if record is None else record["task_id"]
@@ -537,12 +752,10 @@ class LearningService:
         if task_id is None:
             return None
         record = self._task(task_id)
-        if record["domain"] != domain:
-            raise ValueError("active curator task belongs to a different domain")
         return record if record["status"] == "running" else None
 
     def _task_path(self, task_id: str) -> Path:
-        if not isinstance(task_id, str) or re.fullmatch(r"(?:memory|guidance|skills)-[0-9a-f]{32}", task_id) is None:
+        if not isinstance(task_id, str) or re.fullmatch(r"(?:all|memory|guidance|skills)-[0-9a-f]{32}", task_id) is None:
             raise ValueError("invalid curator task id")
         return self.root / "tasks" / f"{task_id}.json"
 
@@ -553,7 +766,7 @@ class LearningService:
         domain = record.get("domain")
         data = record.get("input")
         if (
-            record.get("task_id") != task_id or domain not in LEARNING_DOMAINS
+            record.get("task_id") != task_id or domain not in CURATION_SCOPES
             or not task_id.startswith(f"{domain}-")
             or record.get("status") not in {"claiming", "running", "completed", "superseded"}
             or record.get("executor") not in {"native", "configured"}
@@ -561,6 +774,10 @@ class LearningService:
             or data["domain"] != domain or data["mode"] not in {"update", "maintain"}
             or not isinstance(data["scope"], str) or not isinstance(data["candidates"], list)
             or any(not isinstance(item, dict) or "evidence" in item for item in data["candidates"])
+            or not isinstance(record.get("children"), dict)
+            or set(record["children"]) != set(curation_domains(domain))
+            or any(not isinstance(child, dict) or child.get("status") not in {"pending", "running", "completed", "failed"}
+                   for child in record["children"].values())
         ):
             raise ValueError("invalid curator task state")
         if record["status"] != "claiming":
@@ -570,10 +787,11 @@ class LearningService:
     def _save_task(self, record: dict) -> None:
         self._write(self._task_path(record["task_id"]), record)
 
-    def _requested_result(self, prepared: dict, mode: str, scope: str) -> dict:
-        if (prepared["mode"], prepared["scope"]) != (mode, scope):
+    def _requested_result(self, prepared: dict, mode: str, scope: str, domain: str) -> dict:
+        if (prepared["mode"], prepared["scope"], prepared["domain"]) != (mode, scope, domain):
             prepared = {
                 **prepared, "status": "active", "requested_mode": mode, "requested_scope": scope,
+                "requested_domain": domain,
                 "reason": "Finish the active domain task before preparing the requested scope.",
             }
         return self._response(prepared)
@@ -688,3 +906,21 @@ def _candidate_input(candidate: LearningCandidate) -> dict[str, Any]:
         "evidence_chars": len(candidate.evidence),
         "source_id": f"L#{relative}", "source_file": f"learning/{relative}",
     }
+
+
+def _workspace_files(root: Path) -> dict[str, str]:
+    paths = git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z").split("\0")
+    result = {}
+    for relative in paths:
+        if not relative:
+            continue
+        path = root / relative
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink() or any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
+            raise ValueError("candidate file must not be a symbolic link: " + relative)
+        mode = path.stat().st_mode
+        if not stat.S_ISREG(mode):
+            raise ValueError("candidate path must be a regular file: " + relative)
+        result[relative] = f"{stat.S_IMODE(mode)}:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
