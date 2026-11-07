@@ -31,10 +31,8 @@ Apply the shared Memory core to the supplied task. Update reconciles candidate e
 - Repair a clear schema or supplied package-rule violation in writable Memory state when it becomes apparent within the task. Leave uncertain repairs and all Pursuit changes untouched, and report them. Fixed Agent Corrections and skill bodies remain owned by their domain curators; preserve references while changing ordinary context.
 - Preserve Memory ids referenced from Pursuit. An Update repair does not authorize editing Pursuit files or removing their references.
 - Preserve unrelated valid content while using enough scope to keep the complete affected graph coherent.
-- Validate the complete graph before finishing.
-- If state changed, stage and commit only allowed RightMemory files touched by the update.
-- If reconciliation and permitted repairs leave state unchanged, make no commit.
-- Leave candidate evidence, claims, and processing receipts to the program. Completion records this domain's judgment even when no semantic edit was useful, and removes raw candidates once all three domains have finished.
+- Edit the assigned Memory files in the parent's candidate worktree and return your judgment. The parent reviews the combined result and owns Git staging, commits, and publication, so another domain's unfinished work does not become live independently.
+- Leave candidate evidence, claims, and processing receipts to the program. A judgment that no semantic edit is useful remains a completed contribution.
 
 ## Final Reply
 

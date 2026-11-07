@@ -26,11 +26,17 @@ class Backend:
     def withdraw(self, candidate_id):
         return self._record("withdraw", candidate_id)
 
-    def begin(self, domain, *, mode="update", scope="", retry_task=None):
+    def begin(self, domain="all", *, mode="update", scope="", retry_task=None):
         return self._record("begin", domain, mode, scope, retry_task)
 
     def complete(self, task_id, output=""):
         return self._record("complete", task_id, output)
+
+    def begin_child(self, task_id, domain, *, instructions="", retry=False):
+        return self._record("begin_child", task_id, domain, instructions, retry)
+
+    def complete_child(self, task_id, domain, attempt, *, output=""):
+        return self._record("complete_child", task_id, domain, attempt, output)
 
     def status(self, task_id=None):
         return self._record("status", task_id)
@@ -56,20 +62,23 @@ class CurationMcpTests(unittest.TestCase):
             "rightmemory_submit", "rightmemory_begin_curation",
             "rightmemory_complete_curation", "rightmemory_curation_status",
             "rightmemory_count_curation_tokens", "rightmemory_withdraw_candidate",
+            "rightmemory_begin_curation_worker", "rightmemory_complete_curation_worker",
         }
         self.assertEqual(asyncio.run(names()), expected)
 
     def test_routes_control_arguments_without_rewriting_evidence(self):
         server, backend = self._server()
         cases = [
-            ("rightmemory_begin_curation", {"domain": "memory"}, ("begin", "memory", "update", "", None)),
+            ("rightmemory_begin_curation", {}, ("begin", "all", "update", "", None)),
             ("rightmemory_withdraw_candidate", {"candidate_id": "cid"}, ("withdraw", "cid")),
             ("rightmemory_submit", {"session_id": " s ", "evidence": "  source\n", "request_id": " r "}, ("submit", " s ", "  source\n", " r ", "native")),
             ("rightmemory_submit", {"session_id": "s", "evidence": "source"}, ("submit", "s", "source", None, "native")),
-            ("rightmemory_begin_curation", {"domain": "guidance"}, ("begin", "guidance", "update", "", None)),
             ("rightmemory_begin_curation", {"domain": "skills", "mode": "maintain", "scope": "cases", "retry_task": "old"}, ("begin", "skills", "maintain", "cases", "old")),
             ("rightmemory_complete_curation", {"task_id": "task", "output": "Done"}, ("complete", "task", "Done")),
             ("rightmemory_complete_curation", {"task_id": "task"}, ("complete", "task", "")),
+            ("rightmemory_begin_curation_worker", {"task_id": "task", "domain": "memory"}, ("begin_child", "task", "memory", "", False)),
+            ("rightmemory_begin_curation_worker", {"task_id": "task", "domain": "skills", "retry": True}, ("begin_child", "task", "skills", "", True)),
+            ("rightmemory_complete_curation_worker", {"task_id": "task", "domain": "guidance", "attempt": "attempt", "output": "Done"}, ("complete_child", "task", "guidance", "attempt", "Done")),
             ("rightmemory_curation_status", {"task_id": "task"}, ("status", "task")),
             ("rightmemory_curation_status", {}, ("status", None)),
             ("rightmemory_count_curation_tokens", {"domain": "memory"}, ("count", "memory", None)),

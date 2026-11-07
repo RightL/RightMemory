@@ -35,11 +35,20 @@ class AssistantCliTests(IsolatedWriteTestBase):
         self.addCleanup(evidence.unlink, missing_ok=True)
         code, submitted = self._control("submit", "--executor", "native", "--session", "cli", "--request-id", "one", "--file", str(evidence))
         self.assertEqual(code, 0)
-        self.assertTrue(all(item["ready"] for item in submitted["curation"]))
-        code, task = self._control("curate", "begin", "--domain", "memory")
-        self.assertEqual(code, 0)
+        notice, = submitted["curation"]
+        self.assertEqual(notice["domain"], "all")
+        self.assertTrue(notice["ready"])
+        code, task = self._control("curate", "begin")
+        self.assertEqual(code, 0, task)
         worktree = Path(task["worktree"])
-        self._append_memory(worktree, "- `atlas` Fictional project launch code is Atlas. → []\n")
+        for domain in ("memory", "guidance", "skills"):
+            arguments = ["--task", task["task_id"], "--domain", domain]
+            code, worker = self._control("curate", "worker-begin", *arguments)
+            self.assertEqual(code, 0, worker)
+            if domain == "memory":
+                self._append_memory(worktree, "- `atlas` Fictional project launch code is Atlas. → []\n")
+            code, reported = self._control("curate", "worker-complete", *arguments, "--attempt", worker["attempt"])
+            self.assertEqual(code, 0, reported)
         self._git("add", "MEMORY.md", cwd=worktree)
         self._git("commit", "-m", "memory: CLI native edit", cwd=worktree)
         environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
@@ -50,8 +59,9 @@ class AssistantCliTests(IsolatedWriteTestBase):
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
         receipt = json.loads(result.stdout)
         self.assertEqual(receipt["status"], "completed")
+        self.assertEqual(receipt["active_root"], str(self.root.resolve()))
         self.assertEqual(receipt["landed_commit"], self._git("rev-parse", "HEAD"))
-        self.assertIn("Atlas", (self.root / "MEMORY.md").read_text())
+        self.assertIn("Atlas", (self.root / "MEMORY.md").read_text(encoding="utf-8"))
 
     def test_argument_and_core_errors_are_json_with_failure_exit(self):
         code, result = self._control("submit", "--executor", "native", "--session", "cli")

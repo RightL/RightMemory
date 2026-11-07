@@ -18,7 +18,7 @@ from .learning import (
     learning_validation_errors, list_learning_candidates, parse_learning_claim,
     record_learning_processed, remove_learning_claim, withdraw_learning_candidate,
     write_learning_claim,
-    learning_batch_candidate_ids, write_learning_batch,
+    learning_batch_candidate_ids, write_learning_batch, curation_domains,
 )
 from .platform import lock_file, unlock_file
 from .semantic_operation import SemanticOperationStore
@@ -67,7 +67,7 @@ class _Upstream:
 
 
 class LearningCoordinator:
-    """Independent domain claims over the same immutable evidence collection.
+    """One parent claim owns a shared candidate and its final publication.
 
     A claim has no clock-based expiry. Explicit replacement changes its token,
     fencing every older worker. Local and synchronized roots use the same state;
@@ -111,12 +111,14 @@ class LearningCoordinator:
         _require_domain(domain)
         if mode not in {"update", "maintain"} or not isinstance(scope, str):
             raise ValueError("invalid curation mode or scope")
+        if mode == "update" and domain != "all":
+            raise ValueError("Update is coordinated across all domains; use domain=all")
         if replace_token is not None:
             _require_token(replace_token)
         with self._locked():
             holder = self._ensure_holder()
             self._synchronize()
-            if mode == "update" and replace_token is None and self.current_claim(domain) is None:
+            if mode == "update" and replace_token is None and not learning_claims(self.memory_root):
                 pending = list_learning_candidates(self.memory_root, domain=domain)
                 if not select_curation_batch(
                     pending, self.batch_config,
@@ -131,8 +133,10 @@ class LearningCoordinator:
                 with self._worktree(base) as worktree:
                     batch_path = None
                     claims = {item.domain: item for item in learning_claims(worktree)}
-                    existing = claims.get(domain)
+                    existing = next(iter(claims.values()), None)
                     pending = {item.candidate_id: item for item in list_learning_candidates(worktree, domain=domain)}
+                    if existing is not None and existing.domain != domain:
+                        return ClaimResult(existing, foreign=True, reason="another parent task is active")
                     if existing is not None and replace_token is None:
                         return ClaimResult(
                             existing, tuple(pending[item] for item in existing.candidate_ids),
@@ -207,23 +211,26 @@ class LearningCoordinator:
                 with self._worktree(base) as worktree:
                     self._require_claim(worktree, claim)
                     self._check_semantic_base(claim, prepared_start_commit, base)
-                    role = DOMAIN_ROLES[claim.domain]
+                    role = "curation-parent"
                     if candidate_commit is not None:
                         parents = git(self.memory_root, "rev-list", "--parents", "-n", "1", candidate_commit).split()
                         if parents != [candidate_commit, prepared_start_commit]:
                             raise LearningSemanticBaseChanged("prepared result is not one commit on its declared base")
                         supervisor = IsolatedWriteSupervisor(self.memory_root, role)
                         supervisor._validate_commits(self.memory_root, [candidate_commit])
+                        self._validate_scope(claim, candidate_commit)
                         result = git_result(worktree, "cherry-pick", "--allow-empty", candidate_commit)
                         if result.returncode:
                             git_result(worktree, "cherry-pick", "--abort")
                             raise LearningSemanticBaseChanged("prepared result no longer applies to domain state")
                         supervisor._validate_commits(worktree, [git(worktree, "rev-parse", "HEAD")])
                     if claim.mode == "maintain":
-                        require_domain_budget(worktree, claim.domain, state_root=self.memory_root)
+                        for domain in curation_domains(claim.domain):
+                            require_domain_budget(worktree, domain, state_root=self.memory_root)
                     paths = [remove_learning_claim(worktree, claim)]
                     if claim.mode == "update":
-                        paths.extend(record_learning_processed(worktree, claim.domain, claim.candidate_ids))
+                        for domain in curation_domains(claim.domain):
+                            paths.extend(record_learning_processed(worktree, domain, claim.candidate_ids))
                     self._validate(worktree, role)
                     commit = self._commit(
                         worktree, paths,
@@ -278,8 +285,7 @@ class LearningCoordinator:
             raise LearningUnavailable("candidate withdrawal lost repeated Git publication races")
 
     def _check_semantic_base(self, claim: LearningClaim, prepared_base: str, current: str) -> None:
-        role = "update" if claim.domain == "memory" else f"{claim.domain}-curator"
-        supervisor = IsolatedWriteSupervisor(self.memory_root, role)
+        supervisor = IsolatedWriteSupervisor(self.memory_root, "curation-parent")
         for end in {current, git(self.memory_root, "rev-parse", "HEAD")}:
             if git_result(self.memory_root, "merge-base", "--is-ancestor", prepared_base, end).returncode:
                 raise LearningSemanticBaseChanged("prepared result is no longer based on current history")
@@ -287,6 +293,13 @@ class LearningCoordinator:
             semantic = [path for path in changed.split("\0") if path and supervisor._is_semantic_read_path(path)]
             if semantic:
                 raise LearningSemanticBaseChanged("domain context changed after preparation: " + ", ".join(semantic))
+
+    def _validate_scope(self, claim: LearningClaim, commit: str) -> None:
+        owners = [IsolatedWriteSupervisor(self.memory_root, DOMAIN_ROLES[domain])
+                  for domain in curation_domains(claim.domain)]
+        paths = git(self.memory_root, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", commit).split("\0")
+        if any(path and not any(owner._is_role_write_path(path) for owner in owners) for path in paths):
+            raise ValueError("parent result changes files outside its requested domains")
 
     def _require_claim(self, root: Path, claim: LearningClaim) -> None:
         current = next((item for item in learning_claims(root) if item.domain == claim.domain), None)
@@ -449,5 +462,4 @@ def _require_commit(value: str) -> None:
 
 
 def _require_domain(value: str) -> None:
-    if value not in LEARNING_DOMAINS:
-        raise ValueError("unknown curation domain")
+    curation_domains(value)

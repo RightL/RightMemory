@@ -124,6 +124,7 @@ class WindowsInstallScriptTests(unittest.TestCase):
                 ):
                     self.assertFalse((skills_target / skill_name).exists())
                 for skill_name in (
+                    "maintain-rightmemory-system",
                     "maintain-rightmemory",
                     "maintain-agent-guidance",
                     "maintain-work-skills",

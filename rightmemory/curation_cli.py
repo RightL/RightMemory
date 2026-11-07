@@ -8,7 +8,7 @@ from pathlib import Path
 from .config import default_memory_root
 from .curation_budget import domain_budget
 from .curation_worker import CurationWorker, default_executor
-from .learning import LEARNING_DOMAINS
+from .learning import CURATION_SCOPES, LEARNING_DOMAINS
 from .learning_service import LearningService
 from .profiles import resolve_memory_root
 
@@ -42,7 +42,7 @@ def _output(operation) -> int:
 
 def submit_main(argv: list[str], *, profile_name: str | None = None) -> int:
     def execute():
-        parser = _Parser(prog="rightmemory submit", description="Capture candidate evidence for the three domain curators.")
+        parser = _Parser(prog="rightmemory submit", description="Capture candidate evidence for curation.")
         parser.add_argument("--root", type=Path)
         parser.add_argument("--session", required=True)
         parser.add_argument("--request-id")
@@ -67,7 +67,7 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
         commands = parser.add_subparsers(dest="command", required=True)
         for name in ("begin", "run"):
             task = commands.add_parser(name)
-            task.add_argument("--domain", choices=LEARNING_DOMAINS, required=True)
+            task.add_argument("--domain", choices=CURATION_SCOPES, default="all")
             task.add_argument("--mode", choices=("update", "maintain"), default="update")
             task.add_argument("--scope", default="")
             if name == "begin":
@@ -84,6 +84,17 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
         count_source.add_argument("--config-root", type=Path, help="Read limits from this root when counting a worktree directly.")
         withdraw = commands.add_parser("withdraw")
         withdraw.add_argument("--candidate", required=True)
+        for action in ("begin", "complete", "run"):
+            child = commands.add_parser(f"worker-{action}")
+            child.add_argument("--task", required=True)
+            child.add_argument("--domain", choices=LEARNING_DOMAINS, required=True)
+            if action == "complete":
+                child.add_argument("--attempt", required=True)
+                child.add_argument("--output", default="")
+            else:
+                child.add_argument("--instructions", default="")
+            if action == "begin":
+                child.add_argument("--retry", action="store_true")
         worker = commands.add_parser("worker")
         worker.add_argument("action", choices=("wake", "stop", "status"))
         args = parser.parse_args(argv)
@@ -109,6 +120,12 @@ def main(argv: list[str], *, profile_name: str | None = None) -> int:
         if args.command == "complete":
             output = "" if args.output_file is None else args.output_file.read_text(encoding="utf-8")
             return service.complete(args.task, output)
+        if args.command == "worker-begin":
+            return service.begin_child(args.task, args.domain, instructions=args.instructions, retry=args.retry)
+        if args.command == "worker-complete":
+            return service.complete_child(args.task, args.domain, args.attempt, output=args.output)
+        if args.command == "worker-run":
+            return service.run_child(args.task, args.domain, instructions=args.instructions)
         if args.command == "count":
             return service.count(args.domain, args.task)
         if args.command == "withdraw":

@@ -141,7 +141,10 @@ else:
                 installer._install_skills()
             self.assertEqual(
                 [call.args[1] for call in install.call_args_list],
-                ["maintain-rightmemory", "maintain-agent-guidance", "maintain-work-skills", "rightmemory-assistant"],
+                [
+                    "maintain-rightmemory-system", "maintain-rightmemory", "maintain-agent-guidance",
+                    "maintain-work-skills", "rightmemory-assistant",
+                ],
             )
             remove.assert_called_once_with(
                 REPO_ROOT / "skills" / "rightmemory-auto-orchestrator-cli" / "SKILL.md",
@@ -198,14 +201,14 @@ else:
                     root = Path(tempdir)
                     installer = self._existing_installer(root, mode)
                     before = _snapshot(root)
-                    notice = {"domain": "memory", "task_id": "memory-test", "executor": executor, "status": status}
+                    notice = {"domain": "all", "task_id": "all-test", "executor": executor, "status": status}
                     with (
                         patch("rightmemory.learning_service.LearningService.notices", return_value=[notice]),
                         patch.object(installer, "_install_runtime") as runtime,
                         patch.object(installer, "_curation_install_boundary") as boundary,
                         patch("builtins.print"),
                     ):
-                        with self.assertRaisesRegex(InstallError, "unfinished curation tasks.*memory-test"):
+                        with self.assertRaisesRegex(InstallError, "unfinished curation tasks.*all-test"):
                             installer.run()
                     runtime.assert_not_called()
                     boundary.assert_not_called()
@@ -216,7 +219,8 @@ else:
             root = Path(tempdir)
             installer = self._existing_installer(root)
             events = []
-            active = {"domain": "skills", "task_id": "skills-test", "executor": "configured", "status": "active"}
+            active = {"domain": "skills", "task_id": "skills-test", "mode": "maintain",
+                      "executor": "configured", "status": "active"}
 
             @contextmanager
             def boundary():
@@ -243,7 +247,7 @@ else:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             installer = self._existing_installer(root)
-            active = {"domain": "guidance", "task_id": "guidance-test", "executor": "configured", "status": "effects_pending"}
+            active = {"domain": "all", "task_id": "all-test", "executor": "configured", "status": "effects_pending"}
 
             @contextmanager
             def boundary():
@@ -294,7 +298,7 @@ else:
                 installer.runtime_python = root / "installed-python"
                 with (
                     patch("rightmemory.learning_service.LearningService.notices", return_value=[{
-                        "domain": "memory", "ready": ready, "next_ready_at": deadline,
+                        "domain": "all", "ready": ready, "next_ready_at": deadline,
                     }]),
                     patch("rightmemory.curation_worker.CurationWorker.wake") as wake,
                     patch("builtins.print"),
@@ -375,7 +379,10 @@ else:
                 for target in targets:
                     self.assertFalse((target / "rightmemory-schema.md").exists())
                     self.assertFalse((target / "rightmemory-edit-correction-rules.md").exists())
-                    expected = {"maintain-rightmemory", "maintain-agent-guidance", "maintain-work-skills"}
+                    expected = {
+                        "maintain-rightmemory-system", "maintain-rightmemory", "maintain-agent-guidance",
+                        "maintain-work-skills",
+                    }
                     if mode == "assistant":
                         expected.add("rightmemory-assistant")
                     else:

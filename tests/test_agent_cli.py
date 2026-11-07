@@ -30,7 +30,7 @@ from rightmemory.agent_cli import (
     _stable_claude_session_id,
 )
 from rightmemory.codex_sdk import CodexSdkRunResult, CodexSdkRunner, CodexSdkTiming
-from rightmemory.config import AgentCliConfig, EmbeddingRetrieveConfig, RUNTIME_ROLES, RuntimeConfig, SyncConfig
+from rightmemory.config import AgentCliConfig, CURATION_PARENT_ROLE, EmbeddingRetrieveConfig, RUNTIME_ROLES, RuntimeConfig, SyncConfig
 from rightmemory.provider_sessions import ProviderSessionRecord, ProviderSessionStore
 from rightmemory.provider_threads import ProviderThreadStore
 
@@ -203,6 +203,18 @@ class AgentCliCommandTests(unittest.TestCase):
 
         self.assertIn("--permission-mode", command)
         self.assertIn("auto", command)
+
+    def test_curation_parent_uses_existing_cli_agent_write_permissions(self):
+        command = build_claude_command(
+            CURATION_PARENT_ROLE,
+            AgentCliConfig(provider="claude"),
+            "fixture",
+            "123e4567-e89b-12d3-a456-426614174000",
+            False,
+        )
+
+        self.assertEqual(command[command.index("--permission-mode") + 1], "auto")
+        self.assertEqual(_codex_sandbox(CURATION_PARENT_ROLE), "full-access")
 
     def test_build_claude_command_rejects_non_uuid_session_id(self):
         with self.assertRaises(ValueError) as caught:

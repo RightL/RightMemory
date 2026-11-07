@@ -29,7 +29,7 @@ from .graph import (
     build_graph_manifest,
     remove_edge_targets,
 )
-from .learning import is_learning_path, is_learning_state_path, learning_write_path
+from .learning import DOMAIN_ROLES, is_learning_path, is_learning_state_path, learning_write_path
 from .tools import (
     CORRECTIONS_PATH,
     FIXED_CORRECTION_COLLECTION_PATHS,
@@ -742,6 +742,8 @@ class IsolatedWriteSupervisor:
         return None
 
     def _is_semantic_read_path(self, path: str) -> bool:
+        if self.role == "curation-parent" and is_learning_state_path(path):
+            return False
         separate_domain_path = (
             path.startswith("learning/")
             or path in FIXED_CORRECTION_COLLECTION_PATHS or bool(MEMORY_SKILL_FILE_RE.fullmatch(path))
@@ -799,6 +801,9 @@ class IsolatedWriteSupervisor:
                 raise RuntimeError(f"memory path is not a regular file: {path}")
 
     def _is_role_write_path(self, path: str) -> bool:
+        if self.role == "curation-parent":
+            return any(IsolatedWriteSupervisor(self.memory_root, role)._is_role_write_path(path)
+                       for role in DOMAIN_ROLES.values())
         if self.role in {"guidance-curator", "skills-curator"}:
             domain = self.role.removesuffix("-curator")
             if is_learning_state_path(path):

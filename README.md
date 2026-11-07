@@ -2,7 +2,7 @@
 
 **Context, guidance, and reusable work that help agents need less repeated direction.**
 
-RightMemory helps agents carry useful understanding from one session to the next: context about the user and other people, guidance learned from collaboration, and experience that makes complex work easier to repeat. One daily entry gathers and retrieves evidence; three domain curators turn it into useful long-term state. The user also owns a separate Pursuit map of ongoing directions.
+RightMemory helps agents carry useful understanding from one session to the next: context about the user and other people, guidance learned from collaboration, and experience that makes complex work easier to repeat. One daily entry gathers and retrieves evidence; a parent coordinates three domain curators and reviews their combined result before publication. The user also owns a separate Pursuit map of ongoing directions.
 
 Memory and Pursuit remain Markdown document trees in one addressable graph. Guidance, bounded correction cases, work experiences, and skills remain inspectable files alongside that graph. Shared views and Git sync support continuity across sessions, devices, clients, and collaborating teams.
 
@@ -11,7 +11,7 @@ Memory and Pursuit remain Markdown document trees in one addressable graph. Guid
 - **Less repeated explanation:** preserve circumstances, choices, reasons, and relationships that help a later agent understand what matters.
 - **Work that can be repeated:** retain methods, result standards, human contributions, and resources that let a short later request produce a meaningful outcome.
 - **Learning during ordinary use:** capture plausible useful evidence without requiring a finished general rule or a manual review of every candidate.
-- **Clear ownership:** ordinary Memory, behavioral guidance, and reusable work have separate curators with a shared core for update and maintenance.
+- **Clear ownership:** domain curators apply their learning cores; a parent owns the usefulness and coherence of their combined result in both update and maintenance.
 - **Portable, inspectable state:** retain natural-language files, relevant assets, provenance, and Git history across supported executors and devices.
 
 ## The RightMemory Semantic Model
@@ -26,7 +26,7 @@ Each domain uses one short shared core for candidate updates and requested broad
 
 ### What Belongs Where?
 
-All useful evidence enters through one `rightmemory submit` path. Memory, guidance, and skills inspect the same candidate independently, so the submitting agent does not need to decide its final lesson or destination.
+All useful evidence enters through one `rightmemory submit` path. Memory, guidance, and skills inspect the same evidence through their respective cores, so the submitting agent does not need to decide its final lesson or destination. The parent reviews proposed retention and omission together before any domain's result reaches live state.
 
 The capture threshold is lower than the threshold for a stable generalization. Preserve a useful interaction even when recurrence or its broader meaning remains uncertain. Curators compare the evidence with current state, preserve scope, and decide whether to improve guidance, retain a concrete experience, develop a skill, or make no durable change.
 
@@ -77,7 +77,7 @@ cd RightMemory
 .\install.ps1
 ```
 
-The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs six skills into both `~/.codex/skills` and `~/.claude/skills`: `rightmemory-auto-orchestrator`, `maintain-pursuit-map`, `maintain-rightmemory`, `maintain-agent-guidance`, `maintain-work-skills`, and `rightmemory-manager`. The maintenance skills and Manager handle explicit user requests; Manager acts as a long-lived coordination conversation for a Pursuit direction in Codex App. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
+The default install uses standalone mode, creates `~/.rightmemory`, installs the `rightmemory` CLI, and installs seven skills into both `~/.codex/skills` and `~/.claude/skills`: `rightmemory-auto-orchestrator`, `maintain-pursuit-map`, `maintain-rightmemory-system`, `maintain-rightmemory`, `maintain-agent-guidance`, `maintain-work-skills`, and `rightmemory-manager`. The maintenance skills and Manager handle explicit user requests; Manager acts as a long-lived coordination conversation for a Pursuit direction in Codex App. On Windows, `~` means your PowerShell home directory. Any agent that can run shell commands, including Gemini CLI-style workflows, can call the CLI directly; the packaged skill install currently targets Codex and Claude Code.
 
 If you want RightMemory roles to run through the Codex SDK or Claude Code CLI:
 
@@ -124,9 +124,9 @@ rightmemory watch start
 
 A typical conversation asks a new agent to continue work or repeat a familiar task. The daily entry retrieves relevant Memory, guidance, experiences, skills, and raw evidence, then applies them to the current request.
 
-At a natural boundary, the daily entry submits useful evidence once. The same interaction can improve ordinary context, guidance, and work skills independently. A configured worker processes ready domains automatically; native execution delegates them through the current assistant. An accepted submission confirms capture; curation completion confirms publication. Ordinary MCP keeps successful capture quiet, while the CLI provides inspection and recovery. Fully processed raw candidates leave current retrieval, while useful retained material remains.
+At a natural boundary, the daily entry submits useful evidence once. A configured worker runs a parent when evidence is ready; native execution delegates that parent through the current assistant. The parent coordinates domain contributions and reviews their combined value. An accepted submission confirms capture; parent completion confirms publication. Ordinary MCP keeps successful capture quiet, while the CLI provides inspection and recovery. Fully processed raw candidates leave current retrieval, while useful retained material remains.
 
-The user can later request broader maintenance through the corresponding domain skill. The Pursuit map remains under human control. See [docs/DEMO.md](docs/DEMO.md) for a recording script.
+The user can later request broader maintenance through `maintain-rightmemory-system`, or use a domain skill for a focused request. Both use the parent workflow. The Pursuit map remains under human control. See [docs/DEMO.md](docs/DEMO.md) for a recording script.
 
 ## What It Gives You
 
@@ -400,9 +400,11 @@ Choose the daily entry for the executor in use: `rightmemory-assistant` delegate
 
 One `rightmemory submit` call records evidence for all three curators. Submission does not set final wording, classification, or a destination file. Session ids provide provenance; they are not task identities.
 
-Configured submission wakes one curation worker, which runs ready domains through their configured executors. Native execution uses model-free `curate begin`, delegates the prepared worktree to a native agent, and calls `curate complete`. Updates process bounded batches; remaining candidates stay pending for later batches. Each domain can complete without a semantic edit. The program removes a raw candidate after all three domains finish, leaving whatever context, guidance, cases, or experience the curators retained.
+Configured submission wakes one curation worker, which runs a parent through its configured executor. Native execution uses model-free `curate begin` and delegates the prepared task to a native parent. In both cases, domain agents edit disjoint files in one shared isolated worktree. They report their judgments without staging, committing, or publishing. The parent reviews what to retain, omit, or relocate across domains, resolves revisions, then commits and calls `curate complete`. The program validates and publishes the combined result once.
 
-All three maintenance skills use the same preparation and completion controls with `--mode maintain --scope`. Maintenance reassesses related material as a collection within the requested scope, deciding what should remain and whose future work it helps. Deletion is the primary way to reduce accumulated material. Compaction removes redundancy from retained content while preserving the concrete context needed to understand and use it. Maintenance does not consume pending candidates. The program validates allowed changes and controls publication; agents use the domain's shared core to judge the content.
+Update processes one bounded batch across all three domains; remaining candidates stay pending for later batches. Domain contributions may contain no semantic edit. Parent completion records all three processing receipts and removes the processed raw source together, leaving whatever useful material was retained. There is no separately published single-domain Update.
+
+`maintain-rightmemory-system` coordinates maintenance across all three domains. The three domain maintenance skills use the same parent flow with only the requested domain writable. All use `--mode maintain --scope`. Maintenance reassesses related material as a collection within the requested scope, deciding what should remain and whose future work it helps. Deletion is the primary way to reduce accumulated material. Compaction removes redundancy from retained content while preserving the concrete context needed to understand and use it. Maintenance does not consume pending candidates. The program validates allowed changes and controls publication; agents use each domain's shared core to judge the content.
 
 Retrieve considers relevant graph context, guidance, correction cases, experiences, skills, and pending evidence. Current user instructions and current evidence take precedence over stale or overbroad stored interpretations. Applicable guidance should affect the work itself.
 
@@ -414,6 +416,7 @@ RightMemory keeps role behavior in one canonical prompt set under `rightmemory/p
 
 ```text
 rightmemory/prompts/retrieve.md
+rightmemory/prompts/curation-parent.md
 rightmemory/prompts/update.md
 rightmemory/prompts/guidance-curator.md
 rightmemory/prompts/skills-curator.md
@@ -426,7 +429,9 @@ rightmemory/prompts/sync-reconciler.md
 
 The internal executor modes use these files through the `rightmemory` runtime; native assistant tasks receive the same domain cores and role instructions. Standalone mode loads them into the local Pydantic AI agent and tool loop. CLI-agent mode wraps the same role instructions into prompts sent through the Codex SDK or Claude Code CLI. Other command-capable agents can call the same CLI or daemon surface without changing the schema. The automatic orchestrator skill owns the host agent's retrieval decision, evidence threshold, and natural-boundary timing; the canonical prompts and shared domain cores own the bounded retrieval and curation roles behind its commands. Optional source skills define their narrower workflows when installed manually.
 
-`curation-maintenance.md` supplies shared deletion, compaction, and size guidance
+`curation-parent.md` supplies the same parent core for Update and Maintain. It adds
+combined judgment without replacing the three domain cores. `curation-maintenance.md`
+supplies shared deletion, compaction, and size guidance
 when a task's mode is `maintain`. Maintenance skills load it through the prepared
 task's instructions; ordinary updates do not receive it.
 
@@ -438,9 +443,9 @@ RightMemory has three install modes. The default is `standalone`.
 
 | Mode | Use When | What Gets Installed |
 | --- | --- | --- |
-| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | The CLI, automatic daily entry, three domain maintenance skills, map maintenance, and Manager. |
+| `standalone` | You want RightMemory to run its own local Pydantic AI role agents and tools. | The CLI, automatic daily entry, system and three domain maintenance skills, map maintenance, and Manager. |
 | `cli-agent` | You want RightMemory to delegate each runtime role turn to the Codex SDK or Claude Code CLI. | The same CLI and skills, with delegated role execution. |
-| `assistant` | You want the current assistant to supply native agents and file tools. | The CLI, native daily entry, and all three domain maintenance skills. Explicit root and skill paths are required. |
+| `assistant` | You want the current assistant to supply native agents and file tools. | The CLI, native daily entry, system and three domain maintenance skills, map maintenance, and Manager. Explicit root and skill paths are required. |
 
 The installer arguments are:
 
@@ -454,7 +459,7 @@ The installer arguments are:
 
 - `<memory-root>` is where Memory, Pursuit, optional Agent Correction collections, optional RightMemory Edit Feedback, learning sources, sharing state, and `insight_logs/` live.
 - `<skills-target>` is where your agent loads skills from, such as `~/.claude/skills` or `~/.codex/skills`.
-- With no path arguments, the installer uses `~/.rightmemory` and installs `rightmemory-auto-orchestrator`, `maintain-rightmemory`, `maintain-agent-guidance`, `maintain-work-skills`, `maintain-pursuit-map`, and `rightmemory-manager` into `~/.codex/skills` and `~/.claude/skills`.
+- With no path arguments, the installer uses `~/.rightmemory` and installs `rightmemory-auto-orchestrator`, `maintain-rightmemory-system`, `maintain-rightmemory`, `maintain-agent-guidance`, `maintain-work-skills`, `maintain-pursuit-map`, and `rightmemory-manager` into `~/.codex/skills` and `~/.claude/skills`.
 
 All modes require `git` and `uv`. On macOS, Linux, and WSL, the runtime is
 installed under `${XDG_DATA_HOME:-$HOME/.local/share}/rightmemory/venv`, and the
@@ -488,11 +493,11 @@ semantic work and push successful memory changes after they land.
 ## Everyday Use
 
 1. Let the installed daily entry retrieve context and submit useful evidence according to its instructions. Use an optional ordinary orchestration variant when you want read-only or approval-gated access.
-2. Let the configured worker or native agents process ready domains. For requested broader maintenance, use `maintain-rightmemory`, `maintain-agent-guidance`, or `maintain-work-skills`. The internal runtime's `watch start` still serves pruning, Insight, and optional sync.
+2. Let the configured worker or native agents process ready evidence through the parent. For broader maintenance, use `maintain-rightmemory-system`; for one domain, use its maintenance skill. The internal runtime's `watch start` still serves pruning, Insight, and optional sync.
 3. Open `rightmemory pursuit` or explicitly request `maintain-pursuit-map` to change your direction map. Use a node's **Copy context** action to bring its background into Codex App, where you can set up a long-lived Manager conversation for that direction to coordinate worker tasks. Ordinary updates leave the map unchanged.
 4. Use `rightmemory status` for watcher, curation, and sync state, or `rightmemory curate status` for curation tasks and pending evidence.
 
-The three domain maintenance skills let your host agent improve the requested state using each domain's shared learning core. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
+The system and domain maintenance skills let your host agent coordinate the requested cleanup using the shared parent core and each domain's learning core. Insight commits timestamped reflections under `insight_logs/` when broader patterns, risks, or next-step ideas are worth preserving.
 
 ## Command Runtime
 
@@ -503,8 +508,11 @@ rightmemory retrieve --session <agent-session-id> "find memory about the standal
 rightmemory submit --root <memory-root> --session <agent-session-id> --request-id <id> --file <evidence.txt>
 rightmemory curate --root <memory-root> status
 rightmemory curate --root <memory-root> count --domain guidance
-rightmemory curate --root <memory-root> run --domain memory --mode update
+rightmemory curate --root <memory-root> run --mode update
+rightmemory curate --root <memory-root> begin --mode maintain --scope "review all three domains"
 rightmemory curate --root <memory-root> begin --domain skills --mode maintain --scope "improve the report workflow"
+rightmemory curate --root <memory-root> worker-begin --task <task-id> --domain skills
+rightmemory curate --root <memory-root> worker-complete --task <task-id> --domain skills --attempt <attempt-id>
 rightmemory curate --root <memory-root> count --domain skills --task <task-id>
 rightmemory curate --root <memory-root> complete --task <task-id>
 rightmemory curate --root <memory-root> begin --domain skills --retry <task-id>
@@ -618,15 +626,15 @@ normalizing line endings; markup and special-token-looking strings count as ordi
 text. This is a stable storage measure, not a claim about any model's exact prompt
 usage or the quality of retained content.
 
-Maintenance completion checks the assigned domain's limit before publishing,
+Maintenance completion checks each requested domain's own limit before publishing,
 including no-change judgments and recovered prepared results. An over-limit
 maintenance result leaves active state unchanged. Existing oversized roots remain
 readable and can accept ordinary updates; new learning may grow a domain beyond its
 maintenance ceiling again. Use requested domain maintenance to bring it back within
 the ceiling. Agent Correction collections retain their existing entry limits too.
 
-Memory, guidance, and skills accumulate pending evidence independently. Their shared
-batch settings live in `rightmemory.toml`:
+Update selects shared pending evidence for all three domains. Its batch settings
+live in `rightmemory.toml`:
 
 ```toml
 [curation.batch]
@@ -635,19 +643,19 @@ target_batch_candidates = 30
 max_wait_seconds = 86400
 ```
 
-A domain becomes ready as soon as it has 15 pending candidates, including submissions
+Update becomes ready as soon as it has 15 pending candidates, including submissions
 from sessions that are still active. Below that threshold, each session has a one-hour
 quiet period from its latest pending submission. The oldest quiet session starts a
 batch after a further 24 hours, so small queues can make progress. A new submission
 resets its own session's quiet period; other sessions keep their deadlines.
 
-When a trigger is reached, the program records the eligible evidence for that domain.
+When a trigger is reached, the program records the eligible evidence for the parent.
 Each run processes part of that evidence, up to 30 candidates or 24,000 evidence
 characters. The first candidate is included even when it exceeds the character limit.
 Remaining recorded evidence stays ready for the next run, including across restarts
 and devices. Submissions arriving later wait for their own count or time trigger.
 
-Configured submission wakes a single background worker. It processes ready domains
+Configured submission wakes a single background worker. It runs ready parent tasks
 and waits for the next deadline without invoking a model. New submissions interrupt
 that wait, and installation can stop the waiting worker. The native path exposes the
 same readiness on tool calls for the main assistant to delegate; it does not run an
@@ -664,23 +672,24 @@ Prefer resuming the original task. When edits must be abandoned or reconciled an
 confirm the previous worker has stopped, then use
 `curate begin --domain <domain> --retry <task-id>`. This can explicitly take over a
 claim from another checkout. Replacement fences the old publication and does not
-carry over unpublished edits. Claims are per domain and do not expire on a timer.
+carry over unpublished edits. One parent claim owns curation at a time, including
+single-domain maintenance; claims do not expire on a timer.
 The configured worker makes at most two automatic attempts at the same work, waiting
 one hour after the first failure. The retry time survives restarts and appears in
-worker status; other ready domains can proceed meanwhile. A failure before a task is
+worker status. A failure before a task is
 created belongs to that pending evidence, so a later submission does not inherit an
 exhausted retry budget. After resolving a failure, `curate worker wake` permits another
 attempt; a deliberate task retry gets a new attempt budget.
 
 Batch records, claims, processing receipts, and withdrawals are program-owned. Receipts retain
 candidate identities and hashes, not another copy of the evidence body. Completing the
-last domain removes raw evidence from current state, including for no-change judgments.
+parent records all three domains and removes raw evidence from current state, including for no-change judgments.
 Curators retain useful concrete cases or experiences before completing their work.
 Git history is not rewritten by that removal.
 
 ### CLI-Agent Config
 
-CLI-agent mode uses a global provider plus role model settings. Most installs need a retrieve model and a default writer model; guidance-curator, skills-curator, insight, pruner, historian, and sync repair reuse the writer config unless you override them.
+CLI-agent mode uses a global provider plus role model settings. Most installs need a retrieve model and a default writer model; curation-parent, guidance-curator, skills-curator, insight, pruner, historian, and sync repair reuse the writer config unless you override them.
 
 A minimal Codex setup:
 
@@ -768,7 +777,7 @@ api_key = "<token>"
 
 Normalized `deepseek-*` model ids keep that configurable OpenAI-compatible transport while using Pydantic AI's DeepSeek profile, so thinking-mode tool loops avoid forced tool selection and preserve `reasoning_content` between requests.
 
-Standalone configs use role-local model tables such as `[retrieve.model]`, `[update.model]`, `[guidance-curator.model]`, `[skills-curator.model]`, `[historian.model]`, `[insight.model]`, and `[pruner.model]` for the roles you run. In the common setup, configure `[retrieve.model]` for search and `[update.model]` as the default writer model. Other non-retrieve roles reuse the writer model unless you give them their own table.
+Standalone configs use role-local model tables such as `[retrieve.model]`, `[update.model]`, `[curation-parent.model]`, `[guidance-curator.model]`, `[skills-curator.model]`, `[historian.model]`, `[insight.model]`, and `[pruner.model]` for the roles you run. In the common setup, configure `[retrieve.model]` for search and `[update.model]` as the default writer model. Other non-retrieve roles reuse the writer model unless you give them their own table.
 
 Configure `[sync-reconciler.model]` or `[sync-reconciler.agent_cli]` only if sync repair should use a different model from the default writer.
 
@@ -883,7 +892,7 @@ intentionally stays focused on managed watch process state.
 
 #### Curation Provenance
 
-Each domain's publication records which candidate identities and hashes it processed.
+The parent's publication records which candidate identities and hashes each domain processed.
 The semantic diff remains in Git. Pending candidate files contain the submitted body;
 after all domains finish, the program removes that body from current state rather than
 keeping an additional raw-history collection. Curated cases and experiences preserve
@@ -933,7 +942,7 @@ when Windows assigns it a new PID. Run `rightmemory watch start` or
 
 ### Isolated Automatic Writes
 
-Domain curation prepares persistent isolated worktrees for native or configured agents. Each curator can change only its domain's accepted files, and program finalization validates the result, records processing, and publishes it against the current shared claim. Pursuit is outside ordinary curation's writable surface. A no-change judgment still completes processing; it does not require a model-authored record.
+Each parent task prepares one persistent isolated worktree for its domain agents. They edit their assigned files; the parent reviews the combined result and owns staging and commits. Program finalization validates the requested domain scope, records processing, and publishes against the current shared claim. Pursuit is outside ordinary curation's writable surface. A no-change judgment still completes processing; it does not require a model-authored record.
 
 Insight and Pruner run in temporary Git worktrees under `<memory-root>/.runtime/worktrees/`. Pruner remains restricted to ordinary Memory, while Insight commits `insight_logs/*.md`. Runtime validates and lands complete role-owned results; empty `prune:` checkpoints are allowed.
 
@@ -1017,6 +1026,7 @@ RightMemory/
 │       └── RETRIEVE_CONTRACT.md
 └── skills/
     ├── maintain-pursuit-map/SKILL.md
+    ├── maintain-rightmemory-system/SKILL.md
     ├── maintain-rightmemory/SKILL.md
     ├── memory-retriever-cli/SKILL.md
     ├── rightmemory-orchestrator-cli/SKILL.md
@@ -1044,6 +1054,7 @@ After install:
 
 ~/.codex/skills/
 ├── rightmemory-auto-orchestrator/SKILL.md
+├── maintain-rightmemory-system/SKILL.md
 ├── maintain-rightmemory/SKILL.md
 ├── maintain-agent-guidance/SKILL.md
 ├── maintain-work-skills/SKILL.md

@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from .learning import CURATION_SCOPES
 from .platform import (
     detached_process_kwargs, lock_file, lock_file_nonblocking, process_command,
     process_exists, process_identity, python_module_child_env, unlock_file,
@@ -141,7 +142,7 @@ class CurationWorker:
     @contextmanager
     def install_boundary(self, *, timeout_seconds: float = 45):
         # Wake observes this lock without waiting for a long installation.
-        # The worker checks stop between domain tasks, preserving in-flight work.
+        # The worker checks stop between parent tasks, preserving in-flight work.
         with self._locked("install.lock"):
             stopped = self.stop(timeout_seconds=timeout_seconds)
             yield stopped
@@ -226,10 +227,17 @@ class CurationWorker:
                     notices = service.notices()
                     with self._locked("control.lock"):
                         state = self._read()
-                        failures = state.get("failures", {})
-                        for notice in notices:
-                            if notice["domain"] in failures and not self._failure_matches(failures[notice["domain"]], notice):
-                                failures.pop(notice["domain"])
+                        current = {notice["domain"]: notice for notice in notices}
+                        previous = state.get("failures", {})
+                        failures = {
+                            domain: failure for domain, failure in previous.items()
+                            if domain in current and self._failure_matches(failure, current[domain])
+                        }
+                        state["failures"] = failures
+                        pending_update_failure = previous.get("all")
+                        if "all" not in current and pending_update_failure and pending_update_failure.get("task_id") is None:
+                            # A maintenance task can temporarily hide the pending Update batch.
+                            state["failures"] = {**failures, "all": pending_update_failure}
                         state["error"] = "; ".join(f"{key}: {value['error']}" for key, value in failures.items()) or None
                         self._write(state)
                         if state.get("wake", 0) != observed_wake:
@@ -322,7 +330,7 @@ class CurationWorker:
             raise ValueError("invalid curation worker state")
         failures = state.get("failures", {})
         if not isinstance(failures, dict) or any(
-            domain not in {"memory", "guidance", "skills"} or not isinstance(value, dict)
+            domain not in CURATION_SCOPES or not isinstance(value, dict)
             or type(value.get("attempts")) is not int or value["attempts"] < 0
             or not isinstance(value.get("error"), str)
             or (value.get("task_id") is not None and not isinstance(value["task_id"], str))
