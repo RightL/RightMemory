@@ -59,7 +59,7 @@ For a configured domain model, `worker-run` handles preparation, execution, and 
 rightmemory curate --root /absolute/memory-root worker-run --task TASK --domain memory
 ```
 
-The parent reviews the combined diff, handles revisions, validates the result, and owns staging and committing the reviewed changes. It then calls the returned parent completion command, even when the worktree is unchanged. Keep the active-root binding for task commands run from the worktree.
+The parent reviews the combined diff, makes any needed corrections itself, validates the result, and owns staging and committing the reviewed changes. It then calls the returned parent completion command, even when the worktree is unchanged. Keep the active-root binding for task commands run from the worktree.
 
 ```bash
 rightmemory curate --root /absolute/memory-root complete --task TASK

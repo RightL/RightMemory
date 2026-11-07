@@ -15,12 +15,12 @@ what should remain and where before publication. Its core is shared by Update an
 Maintain; it does not replace the domains' learning purposes.
 
 Domain agents edit disjoint files in one isolated candidate worktree. Their changes
-are proposals until the parent has reviewed the combined files and any revisions.
+are proposals until the parent has reviewed the combined files and made any needed corrections.
 The parent stages and commits; the program validates and publishes once. Sharing a
 worktree avoids merging three separately prepared versions of the same state.
 Update gives all three domains one evidence batch. Focused maintenance uses the same
 parent flow with only the requested domain writable. Domain execution remains
-available within a parent task for delegation and revisions, without separate
+available within a parent task for delegation and recovery, without separate
 publication or evidence retirement.
 
 Capture and generalization have different thresholds. Useful circumstances or partial

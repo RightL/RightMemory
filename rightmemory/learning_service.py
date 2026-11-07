@@ -409,12 +409,8 @@ class LearningService:
             text = build_cli_agent_instructions(task.worktree, DOMAIN_ROLES[domain], curation_mode=data["mode"])
             text += f"\n\n{_curation_input(data)}\n\n{instructions}\n"
             text += (
-                "\nYou contribute to a parent-managed task in a shared candidate worktree. "
-                "Edit your domain's files and return your findings to the parent. "
-                "Other domain agents may be editing their own files; preserve their work. "
-                "The parent owns combined review, Git staging/commits and publication. "
-                "Do not stage, commit, reset, switch branches, or run curation completion. "
-                "Report material omissions, uncertainty and changes another domain needs.\n"
+                "\nEdit only your assigned files in the shared worktree and return your findings. "
+                "Leave Git writes and publication to the parent.\n"
             )
             if data["mode"] == "maintain":
                 text += "\nMaintenance budget:\n" + json.dumps(
@@ -551,13 +547,15 @@ class LearningService:
             "\nFor configured domain work, use run_curator(domain, instructions), or the CLI commands below. "
             "For native delegation, worker-begin returns the shared worktree and domain instructions. "
             "After that agent returns, record its result with the returned worker-complete command. "
-            "Each selected domain contributes before parent completion. You can request further revisions "
-            "with another domain invocation, or finish edits yourself after workers have returned.\n"
+            "Each selected domain contributes before parent completion.\n"
         )
         for domain in curation_domains(record["domain"]):
             for action in ("worker-begin", "worker-run"):
                 result += shlex.join(self._argv(action, "--task", task_id, "--domain", domain)) + "\n"
-        result += "\nReview the finished files and their diff before staging and committing the combined result."
+        result += (
+            "\nAfter the domain agents finish, review the files and their diff, "
+            "make any needed corrections yourself, then stage and commit the combined result."
+        )
         return result
 
     def _prepare(self, record: dict, *, claimed: bool) -> dict[str, Any]:
@@ -591,8 +589,6 @@ class LearningService:
             "with native file tools. "
             f"Validate using {shlex.join(['rightmemory', 'validate', '--root', str(task.worktree)])}. "
             "Candidate evidence, claims, and processing receipts belong to program finalization.\n"
-            "After the domain agents return, review the combined result and handle any revisions. "
-            "You own staging and committing the reviewed files; domain agents do not use Git writes. "
             f"After the candidate worktree is clean, run {shlex.join(complete)} even for no change. "
             "Only its receipt confirms publication; successful completion removes the worktree. "
             f"If interrupted, use {shlex.join(status)} and retry completion with the same task id. "
