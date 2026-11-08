@@ -15,7 +15,7 @@ For requested changes, prepare one isolated parent task:
 rightmemory curate --root <active-root> begin --mode maintain --scope "<requested scope>"
 ```
 
-Read the returned `instructions_file`. Check the returned mode and scope; an existing task remains existing work. The parent and domain agents share the returned `worktree`. Use the task's `worker-begin` commands to prepare native domain contributions, then give each available subagent its instructions and shared worktree. Record its returned result with the supplied `worker-complete` command. Configured domain execution is also available through the supplied `worker-run` commands.
+Read the returned `instructions_file`. Check the returned mode and scope; an existing task remains existing work. The parent and domain agents share the returned `worktree`. Use the task's `worker-begin` commands to prepare each selected domain, then delegate its instructions and shared worktree to one agent. Domain agents do their assigned work themselves and return to you. Record each result with the supplied `worker-complete` command. Configured domain execution is also available through the supplied `worker-run` commands.
 
 Domain agents edit their assigned files and report their judgments. After they return, review the actual combined changes against the evidence and shared cores, including material omitted or repeated across domains. Make any needed corrections yourself. You own final validation, staging, commits, and the task's completion command; its receipt confirms publication to the active root. Maintenance leaves pending evidence for Update.
 
