@@ -7,6 +7,8 @@ description: "Use when the user asks to inspect or maintain RightMemory across M
 
 Act as the parent for the requested maintenance. Review the domains together so useful material is neither repeated without added value nor lost between their separate judgments. The prepared task supplies the shared parent core, domain rules, and maintenance requirements.
 
+An explicit request to change these surfaces authorizes the requested maintenance. Read-only inspection does not authorize edits. Resolve ordinary local details from the current state, and ask only when a missing target or materially different interpretation prevents a safe change; do not add a routine preview-and-approval ceremony.
+
 Use the user's exact root or profile. Otherwise run `rightmemory status` from the task's working directory and use its reported root. For a read-only request, inspect the relevant sources without preparing a write task. Pursuit changes use `maintain-pursuit-map`.
 
 For requested changes, prepare one isolated parent task:

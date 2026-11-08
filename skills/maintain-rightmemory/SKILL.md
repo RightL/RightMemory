@@ -5,7 +5,9 @@ description: "Use when the user explicitly asks to inspect or maintain ordinary 
 
 # Maintain Memory
 
-Use the shared Memory core to improve the requested context. This is the maintenance mode of the same curator that learns from ordinary submissions; it does not require another per-item approval round.
+Use the shared Memory core to improve the requested context. This is the maintenance mode of the same curator that learns from ordinary submissions.
+
+An explicit request to change these surfaces authorizes the requested maintenance. Read-only inspection does not authorize edits. Resolve ordinary local details from the current state, and ask only when a missing target or materially different interpretation prevents a safe change; do not add a routine preview-and-approval ceremony.
 
 Use the user's exact root or profile. Otherwise run `rightmemory status` from the task's working directory and use its reported root. If the root remains unknown, ask rather than guessing.
 

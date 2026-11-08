@@ -5,7 +5,9 @@ description: "Use when the user asks to inspect or maintain RightMemory work exp
 
 # Maintain Work Experience and Skills
 
-Use the shared work-skills core for the requested scope. This is the maintenance mode of the same curator that learns from ordinary submissions; it does not require another per-item approval round.
+Use the shared work-skills core for the requested scope. This is the maintenance mode of the same curator that learns from ordinary submissions.
+
+An explicit request to change these surfaces authorizes the requested maintenance. Read-only inspection does not authorize edits. Resolve ordinary local details from the current state, and ask only when a missing target or materially different interpretation prevents a safe change; do not add a routine preview-and-approval ceremony.
 
 Use the user's exact root or profile. Otherwise run `rightmemory status` from the task's working directory and use its reported root. If the root remains unknown, ask rather than guessing. Read `rightmemory reference work-skills`.
 
