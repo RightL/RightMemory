@@ -407,7 +407,8 @@ class LearningService:
             text = build_cli_agent_instructions(task.worktree, DOMAIN_ROLES[domain], curation_mode=data["mode"])
             text += f"\n\n{_curation_input(data)}\n\n{instructions}\n"
             text += (
-                "\nEdit only your assigned files in the shared worktree and return your findings. "
+                "\nDo your assigned domain work yourself, without further delegation. "
+                "Edit only your assigned files in the shared worktree and return your findings. "
                 "Leave Git writes and publication to the parent.\n"
             )
             if data["mode"] == "maintain":
