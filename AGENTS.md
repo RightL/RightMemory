@@ -74,3 +74,14 @@
 - Write README, schema, prompt, and skill text as a coherent description of the current design, not as a history of accumulated exceptions.
 - When a change modifies the conceptual model, rewrite the surrounding explanation so the new rule is native to it rather than appending a caveat.
 - For broad documentation or schema changes, align on the intended conceptual wording before editing. Small local corrections can be applied directly.
+
+## Personal Data Must Stay Private
+
+- Never upload, commit, push, or publish any personal memory or personal example.
+- Do not copy, quote, paraphrase, anonymize, or derive examples, fixtures, benchmark queries, reports, screenshots, or documentation from real personal memories, conversations, or private user data.
+- Use fully synthetic examples invented from scratch. Keep private memory roots, transcripts, local paths, source identifiers, experiment inputs, outputs, and traces outside the repository and every public artifact.
+- Before committing or publishing, inspect the complete staged content for personal data and personal examples. If any are found, remove them rather than treating redaction or renamed entities as permission to publish.
+
+### Clear Technical Writing
+
+Explain the actual decision directly. Avoid inventing taxonomies, protocols, schemas, or categorical restrictions when the task does not need them.
