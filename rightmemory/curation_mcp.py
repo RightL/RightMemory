@@ -39,6 +39,8 @@ out routine progress and copies of project artifacts with no independent future 
 
 Combine related evidence at a natural boundary, keeping attempts, corrections, and
 outcomes together when their relationship explains what a future agent could learn.
+When later feedback or results materially change an earlier submission, submit
+the update with enough context to show what changed and what remains uncertain.
 Reuse request_id and identical evidence
 when retrying the same submission; distinct later occurrences receive new request IDs.
 Pending evidence remains available to retrieval until the program publishes the reviewed
