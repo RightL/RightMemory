@@ -26,6 +26,9 @@ to interpret it. A useful candidate need not already support a stable conclusion
 Memory, guidance, and skills curators judge it against their own domain cores; submission
 does not write a rule, a skill, or a Memory graph entry.
 
+Make clear what useful difference the evidence could make to future work beyond
+what the request and available project context already provide.
+
 For work evidence, consider what the user was trying to accomplish and how the experience
 could let a future agent repeat meaningful work with much less help from the user. Preserve the
 method, human contributions, outcome, and relevant resources that carry that value beyond
@@ -34,11 +37,12 @@ request and available project context.
 One-off or unsettled evidence can still be useful without becoming a general rule. Leave
 out routine progress and copies of project artifacts with no independent future value.
 
-Combine related evidence at a natural boundary. Reuse request_id and identical evidence
+Combine related evidence at a natural boundary, keeping attempts, corrections, and
+outcomes together when their relationship explains what a future agent could learn.
+Reuse request_id and identical evidence
 when retrying the same submission; distinct later occurrences receive new request IDs.
 Pending evidence remains available to retrieval until the program publishes the reviewed
-result and retires the processed candidates.
-Pursuit edits use the separate maintain-pursuit-map workflow."""
+result and retires the processed candidates."""
 
 
 def register_curation_tools(
