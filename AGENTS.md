@@ -2,6 +2,7 @@
 
 ## Purpose And Audience
 
+- RightMemory is a production project.
 - This file instructs coding agents that inspect and modify the RightMemory repository. It does not define the behavior of RightMemory's runtime roles.
 - Runtime-role behavior belongs in `rightmemory/prompts/`, the implementation, and focused tests. Keep product behavior and design rationale in `README.md` and `DESIGN_NOTES.md` rather than duplicating them here.
 - Add instructions here only when they are durable, repository-specific, and actionable during development. Put narrowly scoped guidance in a nested `AGENTS.md` when appropriate.
